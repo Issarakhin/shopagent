@@ -4,8 +4,13 @@ const ADMIN_KEY = import.meta.env.VITE_ADMIN_API_KEY ?? '';
 const ADMIN_USER = import.meta.env.VITE_ADMIN_USER ?? 'shopping-cambodia-admin';
 const ADMIN_ROLE = import.meta.env.VITE_ADMIN_ROLE ?? 'owner';
 
+// Base URL of the deployed backend (e.g. https://your-app.herokuapp.com).
+// Left empty for local development, where the Express server serves the API on
+// the same origin. Trailing slashes are trimmed so paths join cleanly.
+const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/$/, '');
+
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const response = await fetch(`/api/agent${path}`, {
+  const response = await fetch(`${API_BASE}/api/agent${path}`, {
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -42,7 +47,7 @@ export const agentApi = {
 
 export async function trackStoreEvent(event: Record<string, unknown>) {
   try {
-    await fetch('/api/agent/events', {
+    await fetch(`${API_BASE}/api/agent/events`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(event),
@@ -54,7 +59,7 @@ export async function trackStoreEvent(event: Record<string, unknown>) {
 
 export async function fetchPublicBoosts(): Promise<Array<{ productId: string; score: number; reason: string }>> {
   try {
-    const response = await fetch('/api/agent/public/boosts');
+    const response = await fetch(`${API_BASE}/api/agent/public/boosts`);
     if (!response.ok) return [];
     return await response.json();
   } catch {

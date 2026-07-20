@@ -99,6 +99,7 @@ function formatTime(value?: string) {
 
 export default function AgentAdminCenter({ products, onShowNotification }: Props) {
   const [state, setState] = useState<AgentState | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<Tab>('main');
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
@@ -111,9 +112,19 @@ export default function AgentAdminCenter({ products, onShowNotification }: Props
   const refresh = async () => {
     setLoading(true);
     try {
-      setState(await agentApi.state());
+      const data = await agentApi.state();
+      // Guard against a missing/misconfigured backend returning a non-AgentState
+      // payload (e.g. an SPA index.html fallback), which would otherwise crash the
+      // whole admin page when the render reads state.skills / state.approvals.
+      if (!data || !Array.isArray((data as AgentState).skills) || !Array.isArray((data as AgentState).approvals)) {
+        throw new Error('The AI agent backend is not reachable. Configure VITE_API_BASE_URL to point at the deployed server.');
+      }
+      setState(data);
+      setLoadError(null);
     } catch (error) {
-      onShowNotification(error instanceof Error ? error.message : 'Could not load agent system.', 'error');
+      const message = error instanceof Error ? error.message : 'Could not load agent system.';
+      setLoadError(message);
+      onShowNotification(message, 'error');
     } finally {
       setLoading(false);
     }
@@ -162,7 +173,30 @@ export default function AgentAdminCenter({ products, onShowNotification }: Props
   if (loading && !state) {
     return <div className="flex min-h-72 items-center justify-center"><Loader2 className="h-7 w-7 animate-spin text-emerald-600" /></div>;
   }
-  if (!state) return null;
+  if (!state) {
+    return (
+      <div className="flex min-h-72 items-center justify-center">
+        <div className="max-w-lg rounded-2xl border border-amber-200 bg-amber-50 p-8 text-center">
+          <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full border border-amber-200 bg-white">
+            <CircleOff className="h-7 w-7 text-amber-600" />
+          </div>
+          <h3 className="mb-2 text-lg font-bold text-gray-900">AI Agent backend not connected</h3>
+          <p className="mb-5 text-xs leading-relaxed text-gray-600">
+            {loadError ?? 'The agent system could not be reached.'} The rest of the admin dashboard
+            (Analytics, Inventory, Orders, Categories) works without it.
+          </p>
+          <button
+            onClick={() => void refresh()}
+            disabled={loading}
+            className="inline-flex items-center gap-2 rounded-lg bg-amber-600 px-4 py-2 text-sm font-semibold text-white hover:bg-amber-500 disabled:opacity-50"
+          >
+            {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+            Retry connection
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">

@@ -1,14 +1,15 @@
 import express from 'express';
 import path from 'path';
 import fs from 'fs';
-import { createServer as createViteServer } from 'vite';
 import { INITIAL_PRODUCTS, INITIAL_CATEGORIES } from './src/data.js';
 import { Product, Order, Category, OrderItem, SalesStats } from './src/types.js';
 import { agentRouter } from './server/routes.js';
 import { configureHeartbeat } from './server/heartbeat.js';
 
 const app = express();
-const PORT = 3000;
+// Heroku (and most PaaS hosts) inject the port to bind via process.env.PORT.
+// Falling back to 3000 keeps local development unchanged.
+const PORT = Number(process.env.PORT) || 3000;
 
 // Enable JSON parsing
 app.use(express.json());
@@ -493,7 +494,9 @@ app.post('/api/reset', (req, res) => {
 // ==========================================
 async function startServer() {
   if (process.env.NODE_ENV !== 'production') {
-    // Integrate Vite development server middleware
+    // Integrate Vite development server middleware. Vite is a devDependency and
+    // is imported lazily so production hosts (Heroku) can prune it after build.
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
