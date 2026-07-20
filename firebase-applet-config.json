@@ -1,12 +1,13 @@
 {
-  "projectId": "coach-472803",
-  "appId": "1:177701972540:web:9a5d211c2c12f3e7cd3139",
-  "apiKey": "AIzaSyC1nmJgFmjzV0NEXx0J0TizNB1P-HPIGeI",
-  "authDomain": "coach-472803.firebaseapp.com",
-  "firestoreDatabaseId": "ai-studio-ecommerceadminba-783bf805-3951-4a47-a4b3-d0aee0fc6fac",
-  "storageBucket": "coach-472803.firebasestorage.app",
-  "messagingSenderId": "177701972540",
-  "measurementId": "",
-  "oAuthClientId": "177701972540-j3ul5bkh7763t3aldcm6sd37r5olf6ap.apps.googleusercontent.com",
-  "recaptchaSiteKey": ""
+  "type": "service_account",
+  "project_id": "shopping-cambodia",
+  "private_key_id": "1f28366d262b0d4e3d9674fe0a427f0fb295ce13",
+  "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCX0XE+hfqO+hHF\nA4H5mjaOGr7zJPttP2RjM1n+WDFT0KlhmBzhLdIBVEVr00CQrNH0A8UV5Hsh93LR\nNb/h/GzWVxnJwKDuHmvq4pfz8ekKS7EMI1+P8+Eg3Av+ptPAKPxRTqJi59B0NrLk\n2rIBbid89XorvYwcvifapbo1I4rIFVgRpsId/tcq11T96kZgwAXkI5F+PSvrENjG\nBhV/QcoGYIlai/isblNc4MhEcBDsnozauElH8FIgQnwKgg6DL7KRMTq/Pbk9W7hY\nPBXacZ6SbMuDmnmTBGekDO9EduO3dyZK04Ka8oBioxsAH9KrJXOpTod2OGiVGWNk\nJ9rxLM+ZAgMBAAECggEABADnr9qoIhuZmtyuEYc9z48IgJB12eptSwloYuLwABIV\nWWfBwTVsX5EZmI+UWQxZqAnuaVaiYaGtIzO76Ol3dEqNOUsNY2Ilfeb2U15KgzU+\nSL/pDfqEMhHjdhZvqJZcGwfME/ghgOMNYigbQBrnyy2NCHjB6GMiWWt75tlWWFLf\nXlYrulY0WdVNxAvmeDJYBxB0XTQ7ykknd2peL5i/iEiuR/LAf44X3j5W2hWMB672\n/jjohuB6vWqB9ZPQhMR50eRDy4kv9ZeMc8WCRyq4zGvEbzYrEkpwld8fqCUvLYa/\nFaxhXTQqdkPv47zbfVTkmdOlJ1KCQVYwCSYEbrmRQQKBgQDJ9IDPEUaX5Zddimv+\nbWitXZ+rcsfvlB87HPNDndN6y/WJb4Pn9fi4VFoNHdhbgNYtgWeoj3+EnOTWB9Ui\ncOQGEv+3GYXQCzsKu6oIp7KpRfXWEU5/1hdzBWsAXO566ZFbEDKLyLqEdvB8ibhR\nbIuxo0rXWfjf3tNsa4lChRRqYQKBgQDAcirKf7aNjMWsX4I0PD9HbjAkwMAm0kR+\nD+XiqUN7VAMnOgPjfRVyGbceCWO8fzmgT8/62bGzt7Ei59xraUipSnKWmZyVDjSr\nMbPtnwbOBiG7t5rZHoCegwzNbMveywU3ofPMaE278KzINVcQ772T2XdER2cu+Fil\nyPOupHUgOQKBgHpx8xMY31tDSbXeMkINpdTPGfsCWbSpcxINKHULoOgn91P/t9MQ\n8F8aTYr8WGyKPdFTTz0E3ATUd25JS3FZTvdb14z1PYt487A7PgmHW6yEDVxgG98o\nOAl19H1A2xrMuGOk+3CDIIsl7gMkIQvFKyFl5v+QvnNFj5yByrP5KfqhAoGBAK0o\nDIiX0VIbz+EBLs6BRw6mfnsTU9GacDZdZ6NCWY2mUhABi24tJha8PJ+yIyN/9gHg\nzmoPZm0mYyPdK98ZpF9utRv8q38SgSFoX1T3OdA2hDO7SIEDiQcXM3XC5s1YLyGX\nfx3027y3GUArfmOm0xUtHrs45AbHPjwtS9Vf9GNBAoGAUVXbjA+gFTyKWI8NChAi\ndU4rsqw10pYmbByg2/jRGQ3G8VSnGRlhMvr8NfevRjrODZfKW6jvV0Mqf0BCarNj\nExDQZ1OcyUhWZpizisdGk/rPKO15z+vpXdRmAzdxpB1VXeteiAeutggu+qDzbPQZ\nsifFImL1cL8KejI7zdzO5kk=\n-----END PRIVATE KEY-----\n",
+  "client_email": "firebase-adminsdk-fbsvc@shopping-cambodia.iam.gserviceaccount.com",
+  "client_id": "114024710125372864972",
+  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+  "token_uri": "https://oauth2.googleapis.com/token",
+  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/firebase-adminsdk-fbsvc%40shopping-cambodia.iam.gserviceaccount.com",
+  "universe_domain": "googleapis.com"
 }
