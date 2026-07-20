@@ -2,11 +2,11 @@
 
 ## Vercel frontend
 
-This repository is pinned to npm and Node.js 20. `vercel.json` builds only the Vite client.
+This repository is pinned to npm and Node.js 22. `vercel.json` builds only the Vite client.
 
 1. Push all files, including `package-lock.json`, `.npmrc`, and `vercel.json`.
 2. Confirm that `bun.lock`, `pnpm-lock.yaml`, and `yarn.lock` are not in the repository.
-3. In Vercel, set Node.js to 20.x and redeploy without the previous build cache.
+3. In Vercel, set Node.js to 22.x and redeploy without the previous build cache.
 4. Add `VITE_API_BASE_URL` pointing to the deployed Heroku backend.
 
 ## Heroku backend
