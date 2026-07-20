@@ -48,12 +48,34 @@ function fail(skill: SkillId, action: string, code: string, message: string): Sk
 }
 
 function getDependencyOutputs(workflow: Workflow, step: WorkflowStep): Record<string, unknown> {
+  // Collect outputs transitively across all ancestor steps, not just the direct
+  // dependsOn parents. This lets a downstream step (e.g. publish) read an output
+  // produced further upstream (e.g. the campaign draft) even when the plan wires
+  // the steps in a longer chain.
   const outputs: Record<string, unknown> = {};
-  for (const dependency of step.dependsOn) {
-    const dep = workflow.steps.find((item) => item.id === dependency);
-    if (dep?.output) outputs[dependency] = dep.output;
+  const visited = new Set<string>();
+  const stack = [...step.dependsOn];
+  while (stack.length) {
+    const dependencyId = stack.pop();
+    if (!dependencyId || visited.has(dependencyId)) continue;
+    visited.add(dependencyId);
+    const dep = workflow.steps.find((item) => item.id === dependencyId);
+    if (!dep) continue;
+    if (dep.output) outputs[dependencyId] = dep.output;
+    stack.push(...dep.dependsOn);
   }
   return outputs;
+}
+
+// Resolve the campaign a step should act on: prefer one referenced by dependency
+// outputs/input, otherwise fall back to the campaign created within this workflow.
+function resolveWorkflowCampaignId(
+  workflow: Workflow,
+  input: Record<string, unknown>,
+  dependencies: Record<string, unknown>,
+): string | undefined {
+  return findCampaignId(input, dependencies)
+    ?? agentStore.getState().campaigns.find((campaign) => campaign.workflowId === workflow.id)?.id;
 }
 
 function findProductIds(input: Record<string, unknown>, dependencyOutputs: Record<string, unknown>): string[] {
@@ -193,7 +215,7 @@ async function executeSkill(workflow: Workflow, step: WorkflowStep): Promise<Ski
 
     case 'analytics:measure_campaign_performance':
     case 'marketing:measure_campaign_result': {
-      const campaignId = findCampaignId(input, dependencies);
+      const campaignId = resolveWorkflowCampaignId(workflow, input, dependencies);
       const campaign = state.campaigns.find((item) => item.id === campaignId) ?? state.campaigns[0];
       if (!campaign) return fail(step.skill, step.action, 'CAMPAIGN_NOT_FOUND', 'No campaign is available to measure.');
       const attempted = campaign.sentCount + campaign.failedCount + campaign.skippedCount;
@@ -208,7 +230,7 @@ async function executeSkill(workflow: Workflow, step: WorkflowStep): Promise<Ski
     }
 
     case 'analytics:learn_from_outcomes': {
-      const campaignId = findCampaignId(input, dependencies);
+      const campaignId = resolveWorkflowCampaignId(workflow, input, dependencies);
       if (!campaignId) return fail(step.skill, step.action, 'CAMPAIGN_NOT_FOUND', 'No campaign result was supplied for learning.');
       learnFromCampaign(campaignId);
       return success(step.skill, step.action, 'Verified campaign outcome was stored in long-term agent memory.', { campaignId });
@@ -396,7 +418,7 @@ async function executeSkill(workflow: Workflow, step: WorkflowStep): Promise<Ski
       return success(step.skill, step.action, 'Telegram message draft prepared without sending.', { messageEn: 'Reviewable Shopping Cambodia campaign message.', messageKh: 'សារផ្សព្វផ្សាយ Shopping Cambodia សម្រាប់ពិនិត្យ។' });
 
     case 'marketing:validate_campaign': {
-      const campaignId = findCampaignId(input, dependencies);
+      const campaignId = resolveWorkflowCampaignId(workflow, input, dependencies);
       const campaign = agentStore.getState().campaigns.find((item) => item.id === campaignId);
       if (!campaign) return fail(step.skill, step.action, 'CAMPAIGN_NOT_FOUND', 'Campaign was not found.');
       const products = readProducts().filter((product) => campaign.productIds.includes(product.id));
@@ -445,7 +467,7 @@ async function executeSkill(workflow: Workflow, step: WorkflowStep): Promise<Ski
     }
 
     case 'marketing:publish_approved_campaign': {
-      const campaignId = findCampaignId(input, dependencies);
+      const campaignId = resolveWorkflowCampaignId(workflow, input, dependencies);
       if (!campaignId) return fail(step.skill, step.action, 'CAMPAIGN_NOT_FOUND', 'A campaign draft is required.');
       const campaign = agentStore.getState().campaigns.find((item) => item.id === campaignId);
       if (!campaign) return fail(step.skill, step.action, 'CAMPAIGN_NOT_FOUND', 'Campaign was not found.');
