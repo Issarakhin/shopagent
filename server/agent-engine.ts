@@ -13,7 +13,9 @@ import {
   writeProducts,
   writeReservations,
 } from './business-data.js';
+import { fetchTelegramSubscribers } from './firestore.js';
 import { draftCampaignContent, planWithOpenAI } from './openai-service.js';
+import type { TelegramSubscriber } from './types.js';
 import {
   calculateCustomerSegments,
   calculateDynamicPricing,
@@ -438,7 +440,7 @@ async function executeSkill(workflow: Workflow, step: WorkflowStep): Promise<Ski
       if (!selected.length) return fail(step.skill, step.action, 'NO_ELIGIBLE_PRODUCTS', 'No eligible products are available for a campaign.');
       const requestedBudget = findBudget(input, dependencies);
       const content = await draftCampaignContent({ productNames: selected.map((product) => product.name), audience: 'consented Telegram subscribers', budget: requestedBudget });
-      const subscribers = agentStore.getState().telegramSubscribers;
+      const subscribers = await getCampaignSubscribers();
       const segments = Array.isArray(input.segmentIds) ? input.segmentIds.filter((item): item is string => typeof item === 'string') : ['all-consented'];
       const eligibleCount = subscribers.filter((subscriber) => isSubscriberEligible(subscriber, segments)).length;
       const campaign: Campaign = {
@@ -538,6 +540,19 @@ function isSubscriberEligible(subscriber: import('./types.js').TelegramSubscribe
   return subscriber.isActive && subscriber.isSubscribed && subscriber.marketingConsent && !subscriber.unsubscribedAt && segmentMatch && frequencyAllowed;
 }
 
+// Campaign audience = users captured in the storefront's Firestore telegramChats
+// collection, merged with any subscribers stored in the agent state. Deduped by
+// chatId (Firestore wins).
+async function getCampaignSubscribers(): Promise<TelegramSubscriber[]> {
+  const stateSubscribers = agentStore.getState().telegramSubscribers;
+  const firestoreSubscribers = await fetchTelegramSubscribers();
+  const byChatId = new Map<string, TelegramSubscriber>();
+  for (const subscriber of [...stateSubscribers, ...firestoreSubscribers]) {
+    byChatId.set(subscriber.chatId, subscriber);
+  }
+  return [...byChatId.values()];
+}
+
 async function sendTelegram(chatId: string, text: string): Promise<{ messageId: string }> {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   if (!token) throw new Error('TELEGRAM_BOT_TOKEN is not configured.');
@@ -554,8 +569,7 @@ async function sendTelegram(chatId: string, text: string): Promise<{ messageId: 
 
 async function publishTelegramCampaign(campaign: Campaign, approvalId: string): Promise<SkillResult> {
   if (!['approved', 'awaiting_review'].includes(campaign.status)) return fail('marketing', 'publish_approved_campaign', 'INVALID_CAMPAIGN_STATE', `Campaign cannot publish from ${campaign.status}.`);
-  const state = agentStore.getState();
-  const subscribers = state.telegramSubscribers;
+  const subscribers = await getCampaignSubscribers();
   const eligible = subscribers.filter((subscriber) => isSubscriberEligible(subscriber, campaign.segmentIds));
   agentStore.mutate((draft) => {
     const target = draft.campaigns.find((item) => item.id === campaign.id);

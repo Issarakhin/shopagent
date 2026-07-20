@@ -9,6 +9,7 @@ import {
   updateCampaignDraft,
 } from './agent-engine.js';
 import { configureHeartbeat, runHeartbeat } from './heartbeat.js';
+import { fetchTelegramSubscribers } from './firestore.js';
 import {
   calculateCustomerSegments,
   calculateDynamicPricing,
@@ -235,7 +236,13 @@ agentRouter.post('/admin/campaigns/:id/retry', requireRole('owner', 'admin', 're
   }
 });
 
-agentRouter.get('/admin/telegram-subscribers', (_req, res) => res.json(agentStore.getState().telegramSubscribers));
+agentRouter.get('/admin/telegram-subscribers', async (_req, res) => {
+  const stateSubscribers = agentStore.getState().telegramSubscribers;
+  const firestoreSubscribers = await fetchTelegramSubscribers();
+  const byChatId = new Map<string, TelegramSubscriber>();
+  for (const subscriber of [...stateSubscribers, ...firestoreSubscribers]) byChatId.set(subscriber.chatId, subscriber);
+  res.json([...byChatId.values()]);
+});
 agentRouter.post('/admin/telegram-subscribers', requireRole('owner', 'admin'), (req, res) => {
   if (!req.body?.chatId) return res.status(400).json({ error: 'chatId is required.' });
   const subscriber: TelegramSubscriber = {

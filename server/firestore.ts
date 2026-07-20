@@ -1,5 +1,5 @@
 import admin from 'firebase-admin';
-import type { AgentState } from './types.js';
+import type { AgentState, TelegramSubscriber } from './types.js';
 
 // Initialize firebase-admin from a service account JSON provided via the
 // FIREBASE_SERVICE_ACCOUNT environment variable (paste the whole key JSON as a
@@ -52,6 +52,42 @@ export async function saveAgentStateToFirestore(state: AgentState): Promise<void
     version: state.version,
     updatedAt: new Date().toISOString(),
   });
+}
+
+// Load Telegram subscribers from the storefront's `telegramChats` collection
+// (users/groups/channels that messaged the bot) and map them to the subscriber
+// shape campaigns use, so approved campaigns send to the real captured audience.
+export async function fetchTelegramSubscribers(): Promise<TelegramSubscriber[]> {
+  if (!db) return [];
+  try {
+    const snapshot = await db.collection('telegramChats').get();
+    return snapshot.docs.map((doc) => {
+      const data = doc.data() as Record<string, any>;
+      const chatId = String(data.chatId ?? doc.id);
+      const language: 'km' | 'en' | 'both' =
+        data.languageCode === 'km' ? 'km'
+        : typeof data.languageCode === 'string' && data.languageCode.startsWith('en') ? 'en'
+        : 'both';
+      const subscribed = data.isSubscribed !== false && data.unsubscribed !== true && !data.unsubscribedAt;
+      return {
+        id: `telegramchat_${chatId}`,
+        chatId,
+        displayName: data.customerName ?? data.firstName ?? 'Telegram subscriber',
+        isActive: data.isActive !== false,
+        isSubscribed: subscribed,
+        // Users who started the bot are treated as consented unless a field opts them out.
+        marketingConsent: data.marketingConsent !== false,
+        segmentIds: Array.isArray(data.segmentIds) ? data.segmentIds.map(String) : ['all-consented'],
+        language,
+        unsubscribedAt: data.unsubscribedAt,
+        lastMarketingMessageAt: data.lastMarketingMessageAt,
+        createdAt: typeof data.connectedAt === 'number' ? new Date(data.connectedAt).toISOString() : new Date().toISOString(),
+      } satisfies TelegramSubscriber;
+    });
+  } catch (error) {
+    console.error('Failed to load telegramChats from Firestore:', error);
+    return [];
+  }
 }
 
 // Read a whole collection (products, categories, orders) written by the
