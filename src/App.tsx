@@ -186,10 +186,10 @@ export default function App() {
       // Direct Firestore seeding helper
       await seedDatabaseIfEmpty();
 
-      const [pSnap, cSnap, oSnap] = await Promise.all([
+      // Products and categories are public-read, so the storefront can always load them.
+      const [pSnap, cSnap] = await Promise.all([
         getDocs(collection(db, 'products')),
-        getDocs(collection(db, 'categories')),
-        getDocs(collection(db, 'orders'))
+        getDocs(collection(db, 'categories'))
       ]);
 
       const pList: Product[] = [];
@@ -202,10 +202,17 @@ export default function App() {
         cList.push(d.data() as Category);
       });
 
+      // Orders are admin/owner-only under firestore.rules. Guests and buyers get a
+      // permission-denied here, which is expected — don't let it break the storefront.
       const oList: Order[] = [];
-      oSnap.forEach(d => {
-        oList.push(d.data() as Order);
-      });
+      try {
+        const oSnap = await getDocs(collection(db, 'orders'));
+        oSnap.forEach(d => {
+          oList.push(d.data() as Order);
+        });
+      } catch (orderErr) {
+        console.info('Orders are not readable for the current user (expected for non-admins).', orderErr);
+      }
 
       // Sort lists
       setProducts(pList);
@@ -224,6 +231,14 @@ export default function App() {
   useEffect(() => {
     refreshAllData();
   }, []);
+
+  // Re-sync once the signed-in role is known so admins pick up orders (which are
+  // not readable before authentication under firestore.rules).
+  useEffect(() => {
+    if (userProfile?.role === 'admin') {
+      refreshAllData();
+    }
+  }, [userProfile?.role]);
 
   // Display top floating alerts
   const showNotification = (message: string, type: 'success' | 'error' | 'warning') => {
