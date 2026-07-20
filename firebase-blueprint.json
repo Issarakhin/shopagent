@@ -1,0 +1,51 @@
+{
+  "collections": {
+    "users": {
+      "fields": {
+        "uid": "string",
+        "email": "string",
+        "displayName": "string",
+        "role": "string",
+        "phone": "string",
+        "address": "string",
+        "createdAt": "string"
+      }
+    },
+    "products": {
+      "fields": {
+        "id": "string",
+        "name": "string",
+        "description": "string",
+        "category": "string",
+        "price": "number",
+        "stock": "number",
+        "imageUrl": "string",
+        "unit": "string",
+        "status": "string",
+        "createdAt": "string"
+      }
+    },
+    "categories": {
+      "fields": {
+        "id": "string",
+        "name": "string",
+        "description": "string",
+        "icon": "string"
+      }
+    },
+    "orders": {
+      "fields": {
+        "id": "string",
+        "customerName": "string",
+        "customerEmail": "string",
+        "customerPhone": "string",
+        "customerAddress": "string",
+        "items": "array",
+        "totalAmount": "number",
+        "status": "string",
+        "buyerUid": "string",
+        "createdAt": "string"
+      }
+    }
+  }
+}
