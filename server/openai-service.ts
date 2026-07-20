@@ -203,7 +203,10 @@ export async function planWithOpenAI(command: string, context: Record<string, un
         format: {
           type: 'json_schema',
           name: 'shopping_cambodia_main_agent_plan',
-          strict: true,
+          // Non-strict: strict mode forbids open-ended objects, but a workflow
+          // step's `input` is an arbitrary parameter bag. The response is still
+          // validated by validatePlan() below.
+          strict: false,
           schema: PLAN_SCHEMA,
         },
       },
