@@ -155,7 +155,7 @@ export default function AgentAdminCenter({ products, onShowNotification }: Props
     try {
       const result = await agentApi.plan(command.trim());
       setLastPlan(result);
-      onShowNotification('Main Agent created and started the workflow.', 'success');
+      onShowNotification(result?.workflow?.id ? 'Main Agent created and started the workflow.' : 'Main Agent responded.', 'success');
       await refresh();
       if (result?.workflow?.id) setExpandedWorkflow(result.workflow.id);
     } catch (error) {
@@ -258,7 +258,7 @@ export default function AgentAdminCenter({ products, onShowNotification }: Props
             </div>
             {lastPlan && (
               <div className="mt-4 rounded-2xl border border-emerald-100 bg-emerald-50 p-4">
-                <div className="flex items-start gap-3"><Sparkles className="mt-0.5 h-5 w-5 text-emerald-600" /><div><p className="text-sm font-bold text-emerald-900">{lastPlan.plan?.summary}</p><p className="mt-1 text-xs text-emerald-700">Planner source: {lastPlan.source}. Workflow: {lastPlan.workflow?.name}</p></div></div>
+                <div className="flex items-start gap-3"><Sparkles className="mt-0.5 h-5 w-5 text-emerald-600" /><div><p className="text-sm font-bold text-emerald-900">{lastPlan.plan?.summary}</p>{lastPlan.plan?.clarificationQuestion && <p className="mt-1 text-xs text-emerald-800">{lastPlan.plan.clarificationQuestion}</p>}<p className="mt-1 text-xs text-emerald-700">Planner source: {lastPlan.source}{lastPlan.workflow?.name ? `. Workflow: ${lastPlan.workflow.name}` : ' · No workflow needed for this request.'}</p></div></div>
               </div>
             )}
             <div className="mt-6 space-y-3">

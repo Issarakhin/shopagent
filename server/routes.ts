@@ -69,6 +69,88 @@ agentRouter.post('/events', (req, res) => {
   res.status(201).json({ ok: true, eventId: event.id });
 });
 
+// Telegram webhook: captures users/groups/channels that interact with the bot
+// and stores them as subscribers so campaigns have a real audience. Secured by
+// the secret_token Telegram echoes back in the X-Telegram-Bot-Api-Secret-Token
+// header (set via TELEGRAM_WEBHOOK_SECRET and the setWebhook call).
+function upsertSubscriberFromTelegram(patch: Partial<TelegramSubscriber> & { chatId: string }): void {
+  agentStore.mutate((draft) => {
+    const existing = draft.telegramSubscribers.find((item) => item.chatId === patch.chatId);
+    const subscriber: TelegramSubscriber = {
+      id: existing?.id ?? `subscriber_${patch.chatId}`,
+      chatId: patch.chatId,
+      displayName: patch.displayName ?? existing?.displayName ?? 'Telegram subscriber',
+      isActive: patch.isActive ?? existing?.isActive ?? true,
+      isSubscribed: patch.isSubscribed ?? existing?.isSubscribed ?? true,
+      marketingConsent: patch.marketingConsent ?? existing?.marketingConsent ?? true,
+      segmentIds: existing?.segmentIds ?? ['all-consented'],
+      language: patch.language ?? existing?.language ?? 'both',
+      unsubscribedAt: patch.unsubscribedAt ?? (patch.isSubscribed === false ? new Date().toISOString() : existing?.unsubscribedAt),
+      lastMarketingMessageAt: existing?.lastMarketingMessageAt,
+      createdAt: existing?.createdAt ?? new Date().toISOString(),
+    };
+    draft.telegramSubscribers = draft.telegramSubscribers.filter((item) => item.chatId !== patch.chatId);
+    draft.telegramSubscribers.unshift(subscriber);
+  });
+}
+
+function telegramLanguage(code: unknown): 'km' | 'en' | 'both' {
+  if (code === 'km') return 'km';
+  if (typeof code === 'string' && code.startsWith('en')) return 'en';
+  return 'both';
+}
+
+agentRouter.post('/telegram/webhook', (req, res) => {
+  const secret = process.env.TELEGRAM_WEBHOOK_SECRET;
+  if (secret && req.header('x-telegram-bot-api-secret-token') !== secret) {
+    return res.status(401).json({ ok: false, error: 'Invalid webhook secret.' });
+  }
+  try {
+    const update = req.body ?? {};
+
+    // A user (or someone in a group) messaging the bot.
+    const message = update.message ?? update.channel_post;
+    if (message?.chat?.id !== undefined) {
+      const chatId = String(message.chat.id);
+      const text: string = typeof message.text === 'string' ? message.text.trim() : '';
+      const from = message.from ?? {};
+      const displayName = message.chat.title
+        ?? ([from.first_name, from.last_name].filter(Boolean).join(' ') || from.username || 'Telegram subscriber');
+
+      if (text.startsWith('/stop') || text.startsWith('/unsubscribe')) {
+        upsertSubscriberFromTelegram({ chatId, displayName, isSubscribed: false, marketingConsent: false });
+      } else {
+        // /start or any other message opts the chat in.
+        upsertSubscriberFromTelegram({
+          chatId,
+          displayName,
+          isActive: true,
+          isSubscribed: true,
+          marketingConsent: true,
+          language: telegramLanguage(from.language_code),
+        });
+      }
+    }
+
+    // Bot added to / removed from a group or channel.
+    const membership = update.my_chat_member;
+    if (membership?.chat?.id !== undefined) {
+      const chatId = String(membership.chat.id);
+      const status = membership.new_chat_member?.status;
+      const displayName = membership.chat.title ?? `Telegram ${membership.chat.type ?? 'chat'}`;
+      if (['left', 'kicked'].includes(status)) {
+        upsertSubscriberFromTelegram({ chatId, displayName, isActive: false, isSubscribed: false, marketingConsent: false });
+      } else if (['member', 'administrator', 'creator'].includes(status)) {
+        upsertSubscriberFromTelegram({ chatId, displayName, isActive: true, isSubscribed: true, marketingConsent: true });
+      }
+    }
+  } catch (error) {
+    console.error('Telegram webhook processing failed:', error);
+  }
+  // Always 200 so Telegram does not retry the update.
+  res.status(200).json({ ok: true });
+});
+
 agentRouter.use('/admin', adminAuth);
 
 agentRouter.get('/admin/state', (_req, res) => {

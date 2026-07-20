@@ -8,6 +8,7 @@ import {
   readOrders,
   readProducts,
   readReservations,
+  refreshBusinessDataFromFirestore,
   writeBudget,
   writeProducts,
   writeReservations,
@@ -629,9 +630,11 @@ async function publishTelegramCampaign(campaign: Campaign, approvalId: string): 
   return success('marketing', 'publish_approved_campaign', `Telegram campaign sent to ${sent} recipients.`, { campaignId: campaign.id, sent, failed, skipped, duplicatePrevented, status: finalStatus }, failed ? ['Some recipient sends failed.'] : []);
 }
 
-export async function createWorkflowFromCommand(command: string, actor: string): Promise<{ workflow: Workflow; plan: MainAgentPlan; source: string }> {
+export async function createWorkflowFromCommand(command: string, actor: string): Promise<{ workflow: Workflow | null; plan: MainAgentPlan; source: string }> {
   const state = agentStore.getState();
   if (!state.controls.brainEnabled) throw Object.assign(new Error('Main Agent brain is disabled.'), { code: 'BRAIN_DISABLED' });
+  // Pull the latest inventory from Firestore so stock answers reflect reality.
+  await refreshBusinessDataFromFirestore();
   const context = {
     products: readProducts().map((product) => ({ id: product.id, name: product.name, stock: product.stock, price: product.price, status: product.status })),
     orderCount: readOrders().length,
@@ -639,7 +642,12 @@ export async function createWorkflowFromCommand(command: string, actor: string):
     enabledSkills: state.skills.filter((skill) => skill.enabled).map((skill) => ({ id: skill.id, enabledActions: skill.actions.filter((action) => action.enabled).map((action) => action.id) })),
   };
   const { plan, source } = await planWithOpenAI(command, context);
-  if (!plan.requiresWorkflow || !plan.workflow) throw new Error(plan.clarificationQuestion ?? 'The Main Agent did not produce an executable workflow.');
+  // Informational or clarifying requests (e.g. "check the stock for durian") do
+  // not need a multi-step workflow. Return the agent's answer instead of failing.
+  if (!plan.requiresWorkflow || !plan.workflow) {
+    agentStore.addAudit({ actor, actorRole: 'admin', action: 'main_agent_answer', inputSummary: command, resultSummary: plan.clarificationQuestion ?? plan.summary, success: true });
+    return { workflow: null, plan, source };
+  }
 
   const workflowId = id('workflow');
   const workflow: Workflow = {

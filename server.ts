@@ -5,6 +5,8 @@ import { INITIAL_PRODUCTS, INITIAL_CATEGORIES } from './src/data.js';
 import { Product, Order, Category, OrderItem, SalesStats } from './src/types.js';
 import { agentRouter } from './server/routes.js';
 import { configureHeartbeat } from './server/heartbeat.js';
+import { agentStore } from './server/store.js';
+import { refreshBusinessDataFromFirestore } from './server/business-data.js';
 
 const app = express();
 // Heroku (and most PaaS hosts) inject the port to bind via process.env.PORT.
@@ -493,6 +495,18 @@ app.post('/api/reset', (req, res) => {
 // VITE OR STATIC ASSETS SERVING MIDDLEWARE
 // ==========================================
 async function startServer() {
+  // Restore persisted agent state (workflow history, campaigns, Telegram
+  // subscribers) from Firestore when configured, before serving requests.
+  await agentStore.hydrateFromFirestore();
+
+  // Mirror the storefront's Firestore inventory into the backend so the agent
+  // reads real products/stock/orders. Refresh on boot, then periodically.
+  await refreshBusinessDataFromFirestore();
+  setInterval(() => {
+    void refreshBusinessDataFromFirestore().catch((error) =>
+      console.error('Business data refresh failed:', error));
+  }, 60_000);
+
   if (process.env.NODE_ENV !== 'production') {
     // Integrate Vite development server middleware. Vite is a devDependency and
     // is imported lazily so production hosts (Heroku) can prune it after build.

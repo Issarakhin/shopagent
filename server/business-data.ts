@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { INITIAL_PRODUCTS, INITIAL_CATEGORIES } from '../src/data.js';
 import type { Category, Order, Product } from '../src/types.js';
+import { firestoreEnabled, fetchFirestoreCollection } from './firestore.js';
 
 const DATA_DIR = path.join(process.cwd(), 'data');
 const PRODUCTS_FILE = path.join(DATA_DIR, 'products.json');
@@ -62,11 +63,40 @@ function writeJson<T>(file: string, value: T): void {
   fs.renameSync(tmp, file);
 }
 
-export const readProducts = (): Product[] => readJson<Product[]>(PRODUCTS_FILE, INITIAL_PRODUCTS);
-export const writeProducts = (value: Product[]) => writeJson(PRODUCTS_FILE, value);
-export const readCategories = (): Category[] => readJson<Category[]>(CATEGORIES_FILE, INITIAL_CATEGORIES);
-export const readOrders = (): Order[] => readJson<Order[]>(ORDERS_FILE, []);
-export const writeOrders = (value: Order[]) => writeJson(ORDERS_FILE, value);
+// When Firestore is configured, the storefront/admin is the source of truth for
+// products, categories, and orders. We keep an in-memory mirror (refreshed on
+// startup, periodically, and before planning) so the many synchronous readers
+// below still work while reflecting the real inventory.
+let productCache: Product[] | null = null;
+let categoryCache: Category[] | null = null;
+let orderCache: Order[] | null = null;
+
+export async function refreshBusinessDataFromFirestore(): Promise<void> {
+  if (!firestoreEnabled) return;
+  const [products, categories, orders] = await Promise.all([
+    fetchFirestoreCollection<Product>('products'),
+    fetchFirestoreCollection<Category>('categories'),
+    fetchFirestoreCollection<Order>('orders'),
+  ]);
+  if (products) productCache = products;
+  if (categories) categoryCache = categories;
+  if (orders) orderCache = orders;
+}
+
+export const readProducts = (): Product[] =>
+  firestoreEnabled && productCache ? productCache : readJson<Product[]>(PRODUCTS_FILE, INITIAL_PRODUCTS);
+export const writeProducts = (value: Product[]) => {
+  if (firestoreEnabled) productCache = value;
+  writeJson(PRODUCTS_FILE, value);
+};
+export const readCategories = (): Category[] =>
+  firestoreEnabled && categoryCache ? categoryCache : readJson<Category[]>(CATEGORIES_FILE, INITIAL_CATEGORIES);
+export const readOrders = (): Order[] =>
+  firestoreEnabled && orderCache ? orderCache : readJson<Order[]>(ORDERS_FILE, []);
+export const writeOrders = (value: Order[]) => {
+  if (firestoreEnabled) orderCache = value;
+  writeJson(ORDERS_FILE, value);
+};
 export const readReservations = (): InventoryReservation[] => readJson<InventoryReservation[]>(RESERVATIONS_FILE, []);
 export const writeReservations = (value: InventoryReservation[]) => writeJson(RESERVATIONS_FILE, value);
 export const readBudget = (): BudgetState => readJson<BudgetState>(BUDGET_FILE, {
