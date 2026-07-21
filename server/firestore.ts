@@ -7,7 +7,8 @@ import type { AgentState, TelegramSubscriber } from './types.js';
 // file, so deployments without the key continue to work.
 let db: admin.firestore.Firestore | null = null;
 
-const rawServiceAccount = process.env.FIREBASE_SERVICE_ACCOUNT;
+// Accept either name so an existing FIREBASE_SERVICE_ACCOUNT_JSON config var works too.
+const rawServiceAccount = process.env.FIREBASE_SERVICE_ACCOUNT ?? process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
 if (rawServiceAccount) {
   try {
     const credentials = JSON.parse(rawServiceAccount);
