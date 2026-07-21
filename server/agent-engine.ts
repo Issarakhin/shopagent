@@ -731,7 +731,9 @@ export async function runWorkflow(workflowId: string, actor = 'system'): Promise
 
       if (stepSnapshot.requiresApproval) {
         const dependencyOutputs = getDependencyOutputs(workflow, stepSnapshot);
-        const campaignId = findCampaignId(stepSnapshot.input, dependencyOutputs);
+        // Resolve the campaign the same way the publish step will, so the approval
+        // records the real campaign id/version and the version check passes.
+        const campaignId = resolveWorkflowCampaignId(workflow, stepSnapshot.input, dependencyOutputs);
         const recommendationId = findRecommendationId(dependencyOutputs);
         agentStore.mutate((draft) => {
           const wf = draft.workflows.find((item) => item.id === workflowId)!;
