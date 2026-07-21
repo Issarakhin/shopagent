@@ -70,15 +70,17 @@ function getDependencyOutputs(workflow: Workflow, step: WorkflowStep): Record<st
   return outputs;
 }
 
-// Resolve the campaign a step should act on: prefer one referenced by dependency
-// outputs/input, otherwise fall back to the campaign created within this workflow.
+// Resolve the campaign a step should act on. A workflow creates exactly one
+// campaign draft, so that campaign is authoritative — this ignores any invented
+// campaignId the planner may put in the step input/dependencies, which was
+// causing "Campaign was not found" at the publish step.
 function resolveWorkflowCampaignId(
   workflow: Workflow,
   input: Record<string, unknown>,
   dependencies: Record<string, unknown>,
 ): string | undefined {
-  return findCampaignId(input, dependencies)
-    ?? agentStore.getState().campaigns.find((campaign) => campaign.workflowId === workflow.id)?.id;
+  return agentStore.getState().campaigns.find((campaign) => campaign.workflowId === workflow.id)?.id
+    ?? findCampaignId(input, dependencies);
 }
 
 function findProductIds(input: Record<string, unknown>, dependencyOutputs: Record<string, unknown>): string[] {
