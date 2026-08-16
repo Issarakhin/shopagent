@@ -13,9 +13,9 @@ import {
   writeProducts,
   writeReservations,
 } from './business-data.js';
-import { fetchTelegramSubscribers } from './firestore.js';
 import { draftCampaignContent, planWithOpenAI } from './openai-service.js';
-import type { TelegramSubscriber } from './types.js';
+import { resolveCampaignProductSelection } from './product-selection.js';
+import { runCambodiaMarketIntelligence } from './market-intelligence/daily-market-task.js';
 import {
   calculateCustomerSegments,
   calculateDynamicPricing,
@@ -111,50 +111,64 @@ function fail(skill: SkillId, action: string, code: string, message: string): Sk
 }
 
 function getDependencyOutputs(workflow: Workflow, step: WorkflowStep): Record<string, unknown> {
-  // Collect outputs transitively across all ancestor steps, not just direct
-  // parents, so a downstream step (e.g. publish) can read an output produced
-  // further upstream (e.g. the campaign draft).
   const outputs: Record<string, unknown> = {};
   const visited = new Set<string>();
-  const stack = [...step.dependsOn];
-  while (stack.length) {
-    const dependencyId = stack.pop();
-    if (!dependencyId || visited.has(dependencyId)) continue;
+  const collect = (dependencyId: string) => {
+    if (visited.has(dependencyId)) return;
     visited.add(dependencyId);
-    const dep = workflow.steps.find((item) => item.id === dependencyId);
-    if (!dep) continue;
-    if (dep.output) outputs[dependencyId] = dep.output;
-    stack.push(...dep.dependsOn);
-  }
+    const dependency = workflow.steps.find((item) => item.id === dependencyId);
+    if (!dependency) return;
+    if (dependency.output) outputs[dependencyId] = dependency.output;
+    for (const ancestorId of dependency.dependsOn) collect(ancestorId);
+  };
+  for (const dependencyId of step.dependsOn) collect(dependencyId);
   return outputs;
 }
 
-// A workflow creates exactly one campaign draft, so that campaign is
-// authoritative — this ignores any invented campaignId the planner may place in
-// the step input/dependencies, which caused "Campaign was not found" at publish.
-function resolveWorkflowCampaignId(
-  workflow: Workflow,
-  input: Record<string, unknown>,
-  dependencies: Record<string, unknown>,
-): string | undefined {
-  return agentStore.getState().campaigns.find((campaign) => campaign.workflowId === workflow.id)?.id
-    ?? findCampaignId(input, dependencies);
-}
-
 function findProductIds(input: Record<string, unknown>, dependencyOutputs: Record<string, unknown>): string[] {
-  if (Array.isArray(input.productIds)) return input.productIds.filter((item): item is string => typeof item === 'string');
+  if (Array.isArray(input.productIds)) {
+    const direct = input.productIds.filter((item): item is string => typeof item === 'string');
+    if (direct.length) return direct;
+  }
   for (const output of Object.values(dependencyOutputs)) {
     if (!output || typeof output !== 'object') continue;
     const data = output as Record<string, unknown>;
-    if (Array.isArray(data.productIds)) return data.productIds.filter((item): item is string => typeof item === 'string');
+    if (Array.isArray(data.productIds)) {
+      const selected = data.productIds.filter((item): item is string => typeof item === 'string');
+      if (selected.length) return selected;
+    }
     if (Array.isArray(data.rankedProducts)) {
-      return data.rankedProducts
+      const selected = data.rankedProducts
         .map((item) => (item && typeof item === 'object' ? (item as Record<string, unknown>).productId : undefined))
         .filter((item): item is string => typeof item === 'string')
         .slice(0, 3);
+      if (selected.length) return selected;
     }
   }
   return [];
+}
+
+function findProductSelection(dependencyOutputs: Record<string, unknown>): Record<string, unknown> | undefined {
+  for (const output of Object.values(dependencyOutputs)) {
+    if (!output || typeof output !== 'object') continue;
+    const data = output as Record<string, unknown>;
+    if (data.productSelection && typeof data.productSelection === 'object') {
+      return data.productSelection as Record<string, unknown>;
+    }
+  }
+  return undefined;
+}
+
+function findMarketRecommendation(dependencyOutputs: Record<string, unknown>, productId?: string): Record<string, unknown> | undefined {
+  for (const output of Object.values(dependencyOutputs)) {
+    if (!output || typeof output !== 'object') continue;
+    const data = output as Record<string, unknown>;
+    if (!Array.isArray(data.recommendations)) continue;
+    const recommendations = data.recommendations.filter((item): item is Record<string, unknown> => !!item && typeof item === 'object');
+    const match = productId ? recommendations.find((item) => item.productId === productId) : recommendations[0];
+    if (match) return match;
+  }
+  return undefined;
 }
 
 function calculateWorkflowProgress(workflow: Workflow): number {
@@ -274,14 +288,70 @@ async function executeSkill(workflow: Workflow, step: WorkflowStep): Promise<Ski
     case 'analytics:rank_products': {
       const products = readProducts();
       const boosts = calculateProductBoosts();
-      const rankedProducts = boosts.slice(0, 5).map((boost) => ({
-        ...boost,
-        productName: products.find((product) => product.id === boost.productId)?.name ?? boost.productId,
-      }));
-      return success(step.skill, step.action, `Ranked ${rankedProducts.length} products by smart boost opportunity.`, {
-        rankedProducts,
-        productIds: rankedProducts.slice(0, 3).map((item) => item.productId),
+      const preferredProductIds = Array.isArray(input.preferredProductIds)
+        ? input.preferredProductIds.filter((item): item is string => typeof item === 'string')
+        : [];
+      const selectionRequest = String(input.userRequest ?? input.selectionRequest ?? workflow.goal ?? 'Choose the strongest product to boost.');
+      const maxProducts = Number.isFinite(Number(input.maxProducts)) ? Math.max(1, Math.min(5, Number(input.maxProducts))) : undefined;
+      const productSelection = resolveCampaignProductSelection({
+        request: selectionRequest,
+        products: products.map((product) => ({ ...product, stock: availableToPromise(product) })),
+        sales30d: productSalesMap(30),
+        events: state.events,
+        preferredProductIds,
+        boostScores: new Map(boosts.map((boost) => [boost.productId, boost.score])),
+        maxProducts,
       });
+      if (!productSelection.selectedProductIds.length) {
+        return fail(step.skill, step.action, 'NO_MATCHING_PRODUCTS', 'No active in-stock product matched the requested campaign selection logic.');
+      }
+      return success(step.skill, step.action, `Selected ${productSelection.rankedProducts.map((item) => item.productName).join(', ')} using ${productSelection.strategyLabel.toLowerCase()}.`, {
+        rankedProducts: productSelection.rankedProducts,
+        productIds: productSelection.selectedProductIds,
+        selectionStrategy: productSelection.strategy,
+        selectionReason: productSelection.rankedProducts[0]?.selectionReason,
+        selectionCriteria: productSelection.criteriaSummary,
+        selectionConfidence: productSelection.confidence,
+        productSelection,
+      }, productSelection.noDiscountAssumed ? ['Clearance selection does not create or imply a discount. Any price change requires a separate approved pricing action.'] : []);
+    }
+
+
+    case 'analytics:discover_market_opportunities': {
+      if (!state.controls.marketIntelligenceEnabled) return fail(step.skill, step.action, 'FEATURE_DISABLED', 'Cambodia market intelligence is disabled.');
+      const result = await runCambodiaMarketIntelligence({
+        actor: workflow.createdBy || 'system',
+        force: Boolean(input.force ?? true),
+        request: String(input.requestText ?? input.userRequest ?? workflow.goal ?? 'Find current Cambodia market opportunities.'),
+      });
+      const recommendations = result.recommendations ?? [];
+      const top = recommendations[0];
+      return success(step.skill, step.action, recommendations.length
+        ? `Found ${recommendations.length} Cambodia market opportunities. Top recommendation: ${top.productName}.`
+        : 'Cambodia market scan completed but no catalogue-matched boost opportunity met the scoring threshold.', {
+        market: 'Cambodia',
+        run: result.run,
+        trends: result.trends ?? [],
+        recommendations,
+        productIds: recommendations.map((item) => item.productId),
+        rankedProducts: recommendations.map((item) => ({
+          productId: item.productId,
+          productName: item.productName,
+          selectionScore: item.score,
+          selectionReason: item.selectionReason,
+        })),
+        productSelection: top ? {
+          strategy: 'cambodia_market_trend',
+          strategyLabel: 'Cambodia market trend opportunity',
+          request: String(input.requestText ?? input.userRequest ?? workflow.goal ?? ''),
+          scope: 'Cambodia market and current catalogue',
+          criteriaSummary: 'Match current Cambodia web/media trend evidence with real product stock and internal buyer-demand signals.',
+          selectedProductIds: recommendations.map((item) => item.productId),
+          rankedProducts: recommendations.map((item) => ({ productId: item.productId, productName: item.productName, selectionScore: item.score, selectionReason: item.selectionReason })),
+          confidence: top.confidence,
+          noDiscountAssumed: true,
+        } : undefined,
+      }, ['Trend recommendations are evidence-based suggestions only. Publishing, price changes, and boost activation still require their normal approval paths.']);
     }
 
     case 'analytics:detect_anomaly': {
@@ -292,7 +362,7 @@ async function executeSkill(workflow: Workflow, step: WorkflowStep): Promise<Ski
 
     case 'analytics:measure_campaign_performance':
     case 'marketing:measure_campaign_result': {
-      const campaignId = resolveWorkflowCampaignId(workflow, input, dependencies);
+      const campaignId = findCampaignId(input, dependencies);
       const campaign = state.campaigns.find((item) => item.id === campaignId) ?? state.campaigns[0];
       if (!campaign) return fail(step.skill, step.action, 'CAMPAIGN_NOT_FOUND', 'No campaign is available to measure.');
       const attempted = campaign.sentCount + campaign.failedCount + campaign.skippedCount;
@@ -307,7 +377,7 @@ async function executeSkill(workflow: Workflow, step: WorkflowStep): Promise<Ski
     }
 
     case 'analytics:learn_from_outcomes': {
-      const campaignId = resolveWorkflowCampaignId(workflow, input, dependencies);
+      const campaignId = findCampaignId(input, dependencies);
       if (!campaignId) return fail(step.skill, step.action, 'CAMPAIGN_NOT_FOUND', 'No campaign result was supplied for learning.');
       learnFromCampaign(campaignId);
       return success(step.skill, step.action, 'Verified campaign outcome was stored in long-term agent memory.', { campaignId });
@@ -569,7 +639,7 @@ async function executeSkill(workflow: Workflow, step: WorkflowStep): Promise<Ski
       return success(step.skill, step.action, 'Telegram message draft prepared without sending.', { messageEn: 'Reviewable Shopping Cambodia campaign message.', messageKh: 'សារផ្សព្វផ្សាយ Shopping Cambodia សម្រាប់ពិនិត្យ។' });
 
     case 'marketing:validate_campaign': {
-      const campaignId = resolveWorkflowCampaignId(workflow, input, dependencies);
+      const campaignId = findCampaignId(input, dependencies);
       const campaign = agentStore.getState().campaigns.find((item) => item.id === campaignId);
       if (!campaign) return fail(step.skill, step.action, 'CAMPAIGN_NOT_FOUND', 'Campaign was not found.');
       const products = readProducts().filter((product) => campaign.productIds.includes(product.id));
@@ -591,6 +661,14 @@ async function executeSkill(workflow: Workflow, step: WorkflowStep): Promise<Ski
       if (selected.some((product) => availableToPromise(product) <= 0)) return fail(step.skill, step.action, 'OUT_OF_STOCK_PRODUCT', 'Campaign drafts cannot include products with no available stock.');
 
       const requestedBudget = findBudget(input, dependencies);
+      const productSelection = findProductSelection(dependencies);
+      const marketRecommendation = findMarketRecommendation(dependencies, selected[0]?.id);
+      const selectionStrategy = String(productSelection?.strategy ?? input.selectionStrategy ?? (productIds.length ? 'specific_product' : 'smart_boost'));
+      const selectionReason = String(productSelection?.rankedProducts && Array.isArray(productSelection.rankedProducts)
+        ? ((productSelection.rankedProducts[0] as Record<string, unknown> | undefined)?.selectionReason ?? '')
+        : input.selectionReason ?? 'Selected from current product data.');
+      const selectionCriteria = String(productSelection?.criteriaSummary ?? input.selectionCriteria ?? 'Use current product, stock, sales, and engagement signals.');
+      const selectionConfidence = asNumber(productSelection?.confidence ?? input.selectionConfidence, productIds.length ? 0.99 : 0.75);
       const currentState = agentStore.getState();
       const selectedIds = new Set(selected.map((product) => product.id));
       const recentCampaigns = currentState.campaigns
@@ -632,10 +710,21 @@ async function executeSkill(workflow: Workflow, step: WorkflowStep): Promise<Ski
         budget: requestedBudget,
         campaignGoal,
         userRequest,
+        productSelection: {
+          strategy: selectionStrategy,
+          reason: selectionReason,
+          criteria: selectionCriteria,
+          confidence: selectionConfidence,
+          marketTrendTitle: typeof marketRecommendation?.trendTitle === 'string' ? marketRecommendation.trendTitle : undefined,
+          marketTrendSummary: typeof marketRecommendation?.trendSummary === 'string' ? marketRecommendation.trendSummary : undefined,
+          consumerNeed: typeof marketRecommendation?.consumerNeed === 'string' ? marketRecommendation.consumerNeed : undefined,
+          recommendedCampaignAngle: typeof marketRecommendation?.recommendedCampaignAngle === 'string' ? marketRecommendation.recommendedCampaignAngle : undefined,
+          evidenceUrls: Array.isArray(marketRecommendation?.evidence) ? marketRecommendation.evidence.flatMap((item) => item && typeof item === 'object' && typeof (item as Record<string, unknown>).url === 'string' ? [String((item as Record<string, unknown>).url)] : []).slice(0, 5) : undefined,
+        },
         recentCampaigns,
         verifiedMemory,
       });
-      const subscribers = await getCampaignSubscribers();
+      const subscribers = currentState.telegramSubscribers;
       const segments = Array.isArray(input.segmentIds) ? input.segmentIds.filter((item): item is string => typeof item === 'string') : ['all-consented'];
       const eligibleCount = subscribers.filter((subscriber) => isSubscriberEligible(subscriber, segments)).length;
       const campaign: Campaign = {
@@ -649,6 +738,10 @@ async function executeSkill(workflow: Workflow, step: WorkflowStep): Promise<Ski
         telegramMessageEn: content.en,
         objective: content.objective,
         userRequest: content.userIntent,
+        selectionStrategy,
+        selectionReason,
+        selectionCriteria,
+        selectionConfidence,
         campaignPurpose: content.campaignPurpose,
         targetAudience: content.targetAudience,
         tone: content.tone,
@@ -694,7 +787,7 @@ async function executeSkill(workflow: Workflow, step: WorkflowStep): Promise<Ski
 
 
     case 'marketing:publish_approved_campaign': {
-      const campaignId = resolveWorkflowCampaignId(workflow, input, dependencies);
+      const campaignId = findCampaignId(input, dependencies);
       if (!campaignId) return fail(step.skill, step.action, 'CAMPAIGN_NOT_FOUND', 'A campaign draft is required.');
       const campaign = agentStore.getState().campaigns.find((item) => item.id === campaignId);
       if (!campaign) return fail(step.skill, step.action, 'CAMPAIGN_NOT_FOUND', 'Campaign was not found.');
@@ -798,21 +891,10 @@ async function sendTelegram(chatId: string, text: string): Promise<{ messageId: 
   return { messageId: String(payload.result.message_id) };
 }
 
-// Campaign audience = users captured in the storefront's Firestore telegramChats
-// collection, merged with any subscribers in the agent state, deduped by chatId.
-async function getCampaignSubscribers(): Promise<TelegramSubscriber[]> {
-  const stateSubscribers = agentStore.getState().telegramSubscribers;
-  const firestoreSubscribers = await fetchTelegramSubscribers();
-  const byChatId = new Map<string, TelegramSubscriber>();
-  for (const subscriber of [...stateSubscribers, ...firestoreSubscribers]) {
-    byChatId.set(subscriber.chatId, subscriber);
-  }
-  return [...byChatId.values()];
-}
-
 async function publishTelegramCampaign(campaign: Campaign, approvalId: string): Promise<SkillResult> {
   if (!['approved', 'awaiting_review'].includes(campaign.status)) return fail('marketing', 'publish_approved_campaign', 'INVALID_CAMPAIGN_STATE', `Campaign cannot publish from ${campaign.status}.`);
-  const subscribers = await getCampaignSubscribers();
+  const state = agentStore.getState();
+  const subscribers = state.telegramSubscribers;
   const eligible = subscribers.filter((subscriber) => isSubscriberEligible(subscriber, campaign.segmentIds));
   agentStore.mutate((draft) => {
     const target = draft.campaigns.find((item) => item.id === campaign.id);
@@ -887,24 +969,31 @@ async function publishTelegramCampaign(campaign: Campaign, approvalId: string): 
   return success('marketing', 'publish_approved_campaign', `Telegram campaign sent to ${sent} recipients.`, { campaignId: campaign.id, sent, failed, skipped, duplicatePrevented, status: finalStatus }, failed ? ['Some recipient sends failed.'] : []);
 }
 
-export async function createWorkflowFromCommand(command: string, actor: string): Promise<{ workflow: Workflow | null; plan: MainAgentPlan; source: string }> {
+export async function createWorkflowFromCommand(command: string, actor: string): Promise<{ workflow: Workflow; plan: MainAgentPlan; source: string }> {
   const state = agentStore.getState();
   if (!state.controls.brainEnabled) throw Object.assign(new Error('Main Agent brain is disabled.'), { code: 'BRAIN_DISABLED' });
   const context = {
-    products: readProducts().map((product) => ({ id: product.id, name: product.name, stock: product.stock, price: product.price, status: product.status })),
+    products: readProducts().map((product) => ({
+      id: product.id,
+      name: product.name,
+      description: product.description,
+      category: product.category,
+      stock: product.stock,
+      availableStock: availableToPromise(product),
+      price: product.price,
+      unit: product.unit,
+      status: product.status,
+    })),
     orderCount: readOrders().length,
     pendingApprovalCount: state.approvals.filter((item) => item.status === 'pending').length,
     enabledSkills: state.skills.filter((skill) => skill.enabled).map((skill) => ({ id: skill.id, enabledActions: skill.actions.filter((action) => action.enabled).map((action) => action.id) })),
     recentCampaigns: state.campaigns.slice(0, 10).map((campaign) => ({ id: campaign.id, name: campaign.name, productIds: campaign.productIds, creativeAngle: campaign.creativeAngle, callToAction: campaign.callToAction, status: campaign.status })),
+    latestCambodiaMarketRecommendations: state.dailyBoostRecommendations.slice(0, 5).map((item) => ({ productId: item.productId, productName: item.productName, score: item.score, confidence: item.confidence, trendTitle: item.trendTitle, selectionReason: item.selectionReason })),
+    latestCambodiaMarketTrends: state.marketTrends.slice(0, 8).map((item) => ({ id: item.id, title: item.title, direction: item.direction, confidence: item.confidence, matchedProductIds: item.matchedProductIds, matchedCategories: item.matchedCategories })),
     approvalPolicy: state.skills.flatMap((skill) => skill.actions.filter((action) => action.approvalRequired).map((action) => ({ skill: skill.id, action: action.id, riskLevel: action.riskLevel }))),
   };
   const { plan, source } = await planWithOpenAI(command, context);
-  // Informational or clarifying requests (e.g. "check the stock for durian") need
-  // no multi-step workflow. Return the agent's answer instead of failing.
-  if (!plan.requiresWorkflow || !plan.workflow) {
-    agentStore.addAudit({ actor, actorRole: 'admin', action: 'main_agent_answer', inputSummary: command, resultSummary: plan.clarificationQuestion ?? plan.summary, success: true });
-    return { workflow: null, plan, source };
-  }
+  if (!plan.requiresWorkflow || !plan.workflow) throw new Error(plan.clarificationQuestion ?? 'The Main Agent did not produce an executable workflow.');
 
   const workflowId = id('workflow');
   const workflow: Workflow = {
@@ -979,9 +1068,7 @@ export async function runWorkflow(workflowId: string, actor = 'system'): Promise
       const existingApproved = approvedStepApproval(workflow, stepSnapshot);
       if (policyRequiresApproval && !existingApproved) {
         const dependencyOutputs = getDependencyOutputs(workflow, stepSnapshot);
-        // Resolve the campaign the same way publish will, so the approval records
-        // the real campaign id/version and the version check passes.
-        const campaignId = resolveWorkflowCampaignId(workflow, stepSnapshot.input, dependencyOutputs);
+        const campaignId = findCampaignId(stepSnapshot.input, dependencyOutputs);
         const recommendationId = findRecommendationId(dependencyOutputs);
         agentStore.mutate((draft) => {
           const wf = draft.workflows.find((item) => item.id === workflowId)!;
