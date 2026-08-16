@@ -13,51 +13,41 @@ const app = express();
 // Falling back to 3000 keeps local development unchanged.
 const PORT = Number(process.env.PORT) || 3000;
 
-const allowedOrigins = (
-  process.env.ALLOWED_ORIGINS ||
-  'https://shoppingcambodia-taupe.vercel.app,http://localhost:5173'
-)
+// Any explicitly listed origin, plus any *.vercel.app deployment (production +
+// preview URLs) and localhost dev server, is allowed. The request origin is
+// echoed back (required when Allow-Credentials is set).
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || '')
   .split(',')
   .map(origin => origin.trim())
   .filter(Boolean);
 
+function isAllowedOrigin(origin: string): boolean {
+  if (allowedOrigins.includes(origin)) return true;
+  try {
+    const { hostname } = new URL(origin);
+    return hostname.endsWith('.vercel.app') || hostname === 'localhost' || hostname === '127.0.0.1';
+  } catch {
+    return false;
+  }
+}
+
 app.use((req, res, next) => {
   const origin = req.headers.origin;
-
-  if (origin && allowedOrigins.includes(origin)) {
+  if (origin && isAllowedOrigin(origin)) {
     res.header('Access-Control-Allow-Origin', origin);
     res.header('Vary', 'Origin');
+    res.header('Access-Control-Allow-Credentials', 'true');
   }
-
-  res.header(
-    'Access-Control-Allow-Methods',
-    'GET, POST, PUT, PATCH, DELETE, OPTIONS'
-  );
-
-  res.header(
-    'Access-Control-Allow-Headers',
-    [
-      'Content-Type',
-      'Authorization',
-      'X-Admin-Key',
-      'X-Admin-User',
-      'X-Admin-Role',
-    ].join(', ')
-  );
-
-  res.header('Access-Control-Allow-Credentials', 'true');
-
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, X-Admin-Key, X-Admin-User, X-Admin-Role, X-Telegram-Bot-Api-Secret-Token');
   if (req.method === 'OPTIONS') {
     return res.sendStatus(204);
   }
-
   next();
 });
 
-// Enable JSON parsing
+// Enable JSON parsing (after CORS so preflight responses are never blocked by it).
 app.use(express.json());
-
-// Enable CORS for ease of access if accessed from external services
 
 // Paths for persistent JSON database store
 // Using process.cwd() ensures compatibility when running either locally or in a container/Heroku
@@ -527,18 +517,6 @@ app.post('/api/reset', (req, res) => {
 // VITE OR STATIC ASSETS SERVING MIDDLEWARE
 // ==========================================
 async function startServer() {
-  // Restore persisted agent state (workflow history, campaigns, Telegram
-  // subscribers) from Firestore when configured, before serving requests.
-  await agentStore.hydrateFromFirestore();
-
-  // Mirror the storefront's Firestore inventory into the backend so the agent
-  // reads real products/stock/orders. Refresh on boot, then periodically.
-  await refreshBusinessDataFromFirestore();
-  setInterval(() => {
-    void refreshBusinessDataFromFirestore().catch((error) =>
-      console.error('Business data refresh failed:', error));
-  }, 60_000);
-
   if (process.env.NODE_ENV !== 'production') {
     // Integrate Vite development server middleware. Vite is a devDependency and
     // is imported lazily so production hosts (Heroku) can prune it after build.
@@ -562,6 +540,18 @@ async function startServer() {
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`Shopping Cambodia Full-Stack Server running on http://localhost:${PORT}`);
   });
+
+  // Load Firestore data AFTER the port is bound so a slow/failing Firestore
+  // connection can never delay boot (which on Heroku crashes the dyno and strips
+  // CORS headers). Runs in the background.
+  void agentStore.hydrateFromFirestore().catch((error) =>
+    console.error('Firestore hydration failed:', error));
+  void refreshBusinessDataFromFirestore().catch((error) =>
+    console.error('Business data refresh failed:', error));
+  setInterval(() => {
+    void refreshBusinessDataFromFirestore().catch((error) =>
+      console.error('Business data refresh failed:', error));
+  }, 60_000);
 }
 
 startServer().catch(err => {
