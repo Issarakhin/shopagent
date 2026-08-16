@@ -13,7 +13,9 @@ import {
   writeProducts,
   writeReservations,
 } from './business-data.js';
+import { fetchTelegramSubscribers } from './firestore.js';
 import { draftCampaignContent, planWithOpenAI } from './openai-service.js';
+import type { TelegramSubscriber } from './types.js';
 import {
   calculateCustomerSegments,
   calculateDynamicPricing,
@@ -109,12 +111,34 @@ function fail(skill: SkillId, action: string, code: string, message: string): Sk
 }
 
 function getDependencyOutputs(workflow: Workflow, step: WorkflowStep): Record<string, unknown> {
+  // Collect outputs transitively across all ancestor steps, not just direct
+  // parents, so a downstream step (e.g. publish) can read an output produced
+  // further upstream (e.g. the campaign draft).
   const outputs: Record<string, unknown> = {};
-  for (const dependency of step.dependsOn) {
-    const dep = workflow.steps.find((item) => item.id === dependency);
-    if (dep?.output) outputs[dependency] = dep.output;
+  const visited = new Set<string>();
+  const stack = [...step.dependsOn];
+  while (stack.length) {
+    const dependencyId = stack.pop();
+    if (!dependencyId || visited.has(dependencyId)) continue;
+    visited.add(dependencyId);
+    const dep = workflow.steps.find((item) => item.id === dependencyId);
+    if (!dep) continue;
+    if (dep.output) outputs[dependencyId] = dep.output;
+    stack.push(...dep.dependsOn);
   }
   return outputs;
+}
+
+// A workflow creates exactly one campaign draft, so that campaign is
+// authoritative — this ignores any invented campaignId the planner may place in
+// the step input/dependencies, which caused "Campaign was not found" at publish.
+function resolveWorkflowCampaignId(
+  workflow: Workflow,
+  input: Record<string, unknown>,
+  dependencies: Record<string, unknown>,
+): string | undefined {
+  return agentStore.getState().campaigns.find((campaign) => campaign.workflowId === workflow.id)?.id
+    ?? findCampaignId(input, dependencies);
 }
 
 function findProductIds(input: Record<string, unknown>, dependencyOutputs: Record<string, unknown>): string[] {
@@ -268,7 +292,7 @@ async function executeSkill(workflow: Workflow, step: WorkflowStep): Promise<Ski
 
     case 'analytics:measure_campaign_performance':
     case 'marketing:measure_campaign_result': {
-      const campaignId = findCampaignId(input, dependencies);
+      const campaignId = resolveWorkflowCampaignId(workflow, input, dependencies);
       const campaign = state.campaigns.find((item) => item.id === campaignId) ?? state.campaigns[0];
       if (!campaign) return fail(step.skill, step.action, 'CAMPAIGN_NOT_FOUND', 'No campaign is available to measure.');
       const attempted = campaign.sentCount + campaign.failedCount + campaign.skippedCount;
@@ -283,7 +307,7 @@ async function executeSkill(workflow: Workflow, step: WorkflowStep): Promise<Ski
     }
 
     case 'analytics:learn_from_outcomes': {
-      const campaignId = findCampaignId(input, dependencies);
+      const campaignId = resolveWorkflowCampaignId(workflow, input, dependencies);
       if (!campaignId) return fail(step.skill, step.action, 'CAMPAIGN_NOT_FOUND', 'No campaign result was supplied for learning.');
       learnFromCampaign(campaignId);
       return success(step.skill, step.action, 'Verified campaign outcome was stored in long-term agent memory.', { campaignId });
@@ -545,7 +569,7 @@ async function executeSkill(workflow: Workflow, step: WorkflowStep): Promise<Ski
       return success(step.skill, step.action, 'Telegram message draft prepared without sending.', { messageEn: 'Reviewable Shopping Cambodia campaign message.', messageKh: 'សារផ្សព្វផ្សាយ Shopping Cambodia សម្រាប់ពិនិត្យ។' });
 
     case 'marketing:validate_campaign': {
-      const campaignId = findCampaignId(input, dependencies);
+      const campaignId = resolveWorkflowCampaignId(workflow, input, dependencies);
       const campaign = agentStore.getState().campaigns.find((item) => item.id === campaignId);
       if (!campaign) return fail(step.skill, step.action, 'CAMPAIGN_NOT_FOUND', 'Campaign was not found.');
       const products = readProducts().filter((product) => campaign.productIds.includes(product.id));
@@ -611,7 +635,7 @@ async function executeSkill(workflow: Workflow, step: WorkflowStep): Promise<Ski
         recentCampaigns,
         verifiedMemory,
       });
-      const subscribers = currentState.telegramSubscribers;
+      const subscribers = await getCampaignSubscribers();
       const segments = Array.isArray(input.segmentIds) ? input.segmentIds.filter((item): item is string => typeof item === 'string') : ['all-consented'];
       const eligibleCount = subscribers.filter((subscriber) => isSubscriberEligible(subscriber, segments)).length;
       const campaign: Campaign = {
@@ -670,7 +694,7 @@ async function executeSkill(workflow: Workflow, step: WorkflowStep): Promise<Ski
 
 
     case 'marketing:publish_approved_campaign': {
-      const campaignId = findCampaignId(input, dependencies);
+      const campaignId = resolveWorkflowCampaignId(workflow, input, dependencies);
       if (!campaignId) return fail(step.skill, step.action, 'CAMPAIGN_NOT_FOUND', 'A campaign draft is required.');
       const campaign = agentStore.getState().campaigns.find((item) => item.id === campaignId);
       if (!campaign) return fail(step.skill, step.action, 'CAMPAIGN_NOT_FOUND', 'Campaign was not found.');
@@ -774,10 +798,21 @@ async function sendTelegram(chatId: string, text: string): Promise<{ messageId: 
   return { messageId: String(payload.result.message_id) };
 }
 
+// Campaign audience = users captured in the storefront's Firestore telegramChats
+// collection, merged with any subscribers in the agent state, deduped by chatId.
+async function getCampaignSubscribers(): Promise<TelegramSubscriber[]> {
+  const stateSubscribers = agentStore.getState().telegramSubscribers;
+  const firestoreSubscribers = await fetchTelegramSubscribers();
+  const byChatId = new Map<string, TelegramSubscriber>();
+  for (const subscriber of [...stateSubscribers, ...firestoreSubscribers]) {
+    byChatId.set(subscriber.chatId, subscriber);
+  }
+  return [...byChatId.values()];
+}
+
 async function publishTelegramCampaign(campaign: Campaign, approvalId: string): Promise<SkillResult> {
   if (!['approved', 'awaiting_review'].includes(campaign.status)) return fail('marketing', 'publish_approved_campaign', 'INVALID_CAMPAIGN_STATE', `Campaign cannot publish from ${campaign.status}.`);
-  const state = agentStore.getState();
-  const subscribers = state.telegramSubscribers;
+  const subscribers = await getCampaignSubscribers();
   const eligible = subscribers.filter((subscriber) => isSubscriberEligible(subscriber, campaign.segmentIds));
   agentStore.mutate((draft) => {
     const target = draft.campaigns.find((item) => item.id === campaign.id);
@@ -852,7 +887,7 @@ async function publishTelegramCampaign(campaign: Campaign, approvalId: string): 
   return success('marketing', 'publish_approved_campaign', `Telegram campaign sent to ${sent} recipients.`, { campaignId: campaign.id, sent, failed, skipped, duplicatePrevented, status: finalStatus }, failed ? ['Some recipient sends failed.'] : []);
 }
 
-export async function createWorkflowFromCommand(command: string, actor: string): Promise<{ workflow: Workflow; plan: MainAgentPlan; source: string }> {
+export async function createWorkflowFromCommand(command: string, actor: string): Promise<{ workflow: Workflow | null; plan: MainAgentPlan; source: string }> {
   const state = agentStore.getState();
   if (!state.controls.brainEnabled) throw Object.assign(new Error('Main Agent brain is disabled.'), { code: 'BRAIN_DISABLED' });
   const context = {
@@ -864,7 +899,12 @@ export async function createWorkflowFromCommand(command: string, actor: string):
     approvalPolicy: state.skills.flatMap((skill) => skill.actions.filter((action) => action.approvalRequired).map((action) => ({ skill: skill.id, action: action.id, riskLevel: action.riskLevel }))),
   };
   const { plan, source } = await planWithOpenAI(command, context);
-  if (!plan.requiresWorkflow || !plan.workflow) throw new Error(plan.clarificationQuestion ?? 'The Main Agent did not produce an executable workflow.');
+  // Informational or clarifying requests (e.g. "check the stock for durian") need
+  // no multi-step workflow. Return the agent's answer instead of failing.
+  if (!plan.requiresWorkflow || !plan.workflow) {
+    agentStore.addAudit({ actor, actorRole: 'admin', action: 'main_agent_answer', inputSummary: command, resultSummary: plan.clarificationQuestion ?? plan.summary, success: true });
+    return { workflow: null, plan, source };
+  }
 
   const workflowId = id('workflow');
   const workflow: Workflow = {
@@ -939,7 +979,9 @@ export async function runWorkflow(workflowId: string, actor = 'system'): Promise
       const existingApproved = approvedStepApproval(workflow, stepSnapshot);
       if (policyRequiresApproval && !existingApproved) {
         const dependencyOutputs = getDependencyOutputs(workflow, stepSnapshot);
-        const campaignId = findCampaignId(stepSnapshot.input, dependencyOutputs);
+        // Resolve the campaign the same way publish will, so the approval records
+        // the real campaign id/version and the version check passes.
+        const campaignId = resolveWorkflowCampaignId(workflow, stepSnapshot.input, dependencyOutputs);
         const recommendationId = findRecommendationId(dependencyOutputs);
         agentStore.mutate((draft) => {
           const wf = draft.workflows.find((item) => item.id === workflowId)!;
