@@ -969,7 +969,7 @@ async function publishTelegramCampaign(campaign: Campaign, approvalId: string): 
   return success('marketing', 'publish_approved_campaign', `Telegram campaign sent to ${sent} recipients.`, { campaignId: campaign.id, sent, failed, skipped, duplicatePrevented, status: finalStatus }, failed ? ['Some recipient sends failed.'] : []);
 }
 
-export async function createWorkflowFromCommand(command: string, actor: string): Promise<{ workflow: Workflow; plan: MainAgentPlan; source: string }> {
+export async function createWorkflowFromCommand(command: string, actor: string): Promise<{ workflow: Workflow | null; plan: MainAgentPlan; source: string }> {
   const state = agentStore.getState();
   if (!state.controls.brainEnabled) throw Object.assign(new Error('Main Agent brain is disabled.'), { code: 'BRAIN_DISABLED' });
   const context = {
@@ -993,7 +993,12 @@ export async function createWorkflowFromCommand(command: string, actor: string):
     approvalPolicy: state.skills.flatMap((skill) => skill.actions.filter((action) => action.approvalRequired).map((action) => ({ skill: skill.id, action: action.id, riskLevel: action.riskLevel }))),
   };
   const { plan, source } = await planWithOpenAI(command, context);
-  if (!plan.requiresWorkflow || !plan.workflow) throw new Error(plan.clarificationQuestion ?? 'The Main Agent did not produce an executable workflow.');
+  // A request that needs no multi-step workflow (an answer or a clarifying
+  // question) should return the agent's response, not fail with a generic error.
+  if (!plan.requiresWorkflow || !plan.workflow) {
+    agentStore.addAudit({ actor, actorRole: 'admin', action: 'main_agent_answer', inputSummary: command, resultSummary: plan.clarificationQuestion ?? plan.summary, success: true });
+    return { workflow: null, plan, source };
+  }
 
   const workflowId = id('workflow');
   const workflow: Workflow = {
