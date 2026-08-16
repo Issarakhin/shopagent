@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import Header from './components/Header';
 import StoreFront from './components/StoreFront';
 import AdminDashboard from './components/AdminDashboard';
+import ErrorBoundary from './components/ErrorBoundary';
 import Cart from './components/Cart';
 import AuthModal from './components/AuthModal';
 import { Product, Category, Order, CartItem, SalesStats } from './types';
@@ -386,14 +387,16 @@ export default function App() {
             onUpdateCartQuantity={handleUpdateCartQuantity}
           />
         ) : userProfile?.role === 'admin' ? (
-          <AdminDashboard
-            products={products}
-            categories={categories}
-            orders={orders}
-            stats={stats}
-            onRefreshData={refreshAllData}
-            onShowNotification={showNotification}
-          />
+          <ErrorBoundary fallbackTitle="The admin dashboard hit an error">
+            <AdminDashboard
+              products={products}
+              categories={categories}
+              orders={orders}
+              stats={stats}
+              onRefreshData={refreshAllData}
+              onShowNotification={showNotification}
+            />
+          </ErrorBoundary>
         ) : (
           /* Admin Access Restricted Screen */
           <div className="py-20 flex flex-col items-center justify-center text-center">
