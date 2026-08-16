@@ -1,12 +1,12 @@
 import fs from 'fs';
 import path from 'path';
-import { firestoreEnabled, loadAgentStateFromFirestore, saveAgentStateToFirestore } from './firestore.js';
 import { DEFAULT_SKILLS } from './default-skills.js';
 import {
   AgentState,
   ApprovalRequest,
   AuditLog,
   CacheEntry,
+  Campaign,
   SkillDefinition,
   SkillId,
 } from './types.js';
@@ -76,6 +76,21 @@ function mergeSkills(saved: SkillDefinition[]): SkillDefinition[] {
   });
 }
 
+
+function normalizeCampaign(campaign: Campaign): Campaign {
+  return {
+    ...campaign,
+    userRequest: campaign.userRequest ?? campaign.objective ?? campaign.name,
+    campaignPurpose: campaign.campaignPurpose ?? 'product promotion',
+    targetAudience: campaign.targetAudience ?? 'selected consented subscribers',
+    tone: campaign.tone ?? 'not recorded',
+    contentStyle: campaign.contentStyle ?? 'free-form campaign',
+    contentShape: campaign.contentShape ?? 'one cohesive free-form message',
+    desiredReaction: campaign.desiredReaction ?? 'interest and consideration',
+    userLogicMatch: campaign.userLogicMatch ?? [],
+  };
+}
+
 function normalizeState(raw: Partial<AgentState>): AgentState {
   const initial = createInitialAgentState();
   return {
@@ -91,7 +106,7 @@ function normalizeState(raw: Partial<AgentState>): AgentState {
     skills: mergeSkills(raw.skills ?? []),
     workflows: raw.workflows ?? [],
     approvals: raw.approvals ?? [],
-    campaigns: raw.campaigns ?? [],
+    campaigns: (raw.campaigns ?? []).map(normalizeCampaign),
     campaignRecipients: raw.campaignRecipients ?? [],
     telegramSubscribers: raw.telegramSubscribers ?? [],
     executions: raw.executions ?? [],
@@ -230,45 +245,10 @@ export class AgentStore {
     return this.state.approvals.find((approval) => approval.id === id);
   }
 
-  // Load persisted state from Firestore (if configured) on startup so agent
-  // history, campaigns, and Telegram subscribers survive dyno restarts on hosts
-  // with an ephemeral filesystem (e.g. Heroku).
-  async hydrateFromFirestore(): Promise<void> {
-    if (!firestoreEnabled) return;
-    const remote = await loadAgentStateFromFirestore();
-    if (remote) {
-      this.state = normalizeState(remote);
-      console.log('Agent state hydrated from Firestore.');
-    } else {
-      // First run with Firestore: seed the remote copy from the current state.
-      void saveAgentStateToFirestore(this.state).catch((error) =>
-        console.error('Failed to seed agent state in Firestore:', error));
-    }
-  }
-
-  private firestoreSaveTimer: NodeJS.Timeout | null = null;
-
-  private scheduleFirestoreSave(): void {
-    if (!firestoreEnabled) return;
-    // Debounce: mutate() fires often, so coalesce rapid changes into one write.
-    if (this.firestoreSaveTimer) clearTimeout(this.firestoreSaveTimer);
-    this.firestoreSaveTimer = setTimeout(() => {
-      this.firestoreSaveTimer = null;
-      void saveAgentStateToFirestore(this.state).catch((error) =>
-        console.error('Failed to persist agent state to Firestore:', error));
-    }, 1000);
-  }
-
   private persist(): void {
-    // Cap unbounded history so the persisted state stays small (Firestore has a
-    // 1 MB per-document limit). The most recent runs are what the UI shows.
-    if (this.state.workflows.length > 500) this.state.workflows = this.state.workflows.slice(0, 500);
-    if (this.state.executions.length > 1000) this.state.executions = this.state.executions.slice(0, 1000);
-
     const temp = `${AGENT_FILE}.tmp`;
     fs.writeFileSync(temp, JSON.stringify(this.state, null, 2));
     fs.renameSync(temp, AGENT_FILE);
-    this.scheduleFirestoreSave();
   }
 }
 
