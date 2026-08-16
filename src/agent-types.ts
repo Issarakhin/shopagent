@@ -65,6 +65,7 @@ export interface ApprovalRequest {
   expiresAt: string;
   resourceId?: string;
   resourceVersion?: number;
+  payloadHash: string;
 }
 
 export interface Campaign {
@@ -76,6 +77,22 @@ export interface Campaign {
   segmentIds: string[];
   telegramMessageKh: string;
   telegramMessageEn: string;
+  objective: string;
+  userRequest: string;
+  campaignPurpose: string;
+  targetAudience: string;
+  tone: string;
+  contentStyle: string;
+  contentShape: string;
+  desiredReaction: string;
+  creativeAngle: string;
+  creativeRationale: string;
+  callToAction: string;
+  productFactsUsed: string[];
+  userLogicMatch: string[];
+  variationNotes: string[];
+  similarityScore: number;
+  contentFingerprint: string;
   estimatedRecipientCount: number;
   budget: number;
   createdAt: string;
