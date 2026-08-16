@@ -50,7 +50,13 @@ Planning behavior:
 - Use only trusted backend context. Never invent products, customers, orders, payments, stock, revenue, performance, or discounts.
 - Keep explanations natural and adapted to the admin's goal rather than repeating one fixed wording pattern.
 - Product-specific requests must preserve the named product in downstream workflow inputs.
-- For marketing requests, preserve the full admin request verbatim in create_campaign_draft.input.userRequest and campaignGoal so tone, style, audience, length, exclusions and desired outcome are not lost.
+- Product-selection requests must be resolved from live backend data. Examples include highest stock, slowest sales, clearance candidate, best seller, high views with low conversion, or a named/category product such as fish.
+- Current-trend, market-demand, or 'what should we boost today' requests should use analytics.discover_market_opportunities. That action searches current Cambodia web/media signals and matches them to trusted catalogue, stock, and buyer-demand data.
+- Never invent a Cambodia trend from memory when a live market scan is requested. Use the market-intelligence action and its evidence.
+- For every marketing workflow, pass the complete admin request to analytics.rank_products.input.userRequest. The analytics skill must select the actual product before campaign drafting.
+- A request such as ‘boost the fish product with the most stock’ means filter to the fish category, rank by available stock, select the result, and pass that exact product to the campaign draft.
+- A clearance request means choose a high-stock, slow-moving candidate. It must not invent or apply a discount; price changes require a separate approved pricing workflow.
+- For marketing requests, preserve the full admin request verbatim in create_campaign_draft.input.userRequest and campaignGoal so product-selection logic, tone, style, audience, length, exclusions and desired outcome are not lost.
 - Do not convert a free-form marketing request into a fixed campaign template.
 - If information required for a risky mutation is missing, ask a clarification question instead of guessing.
 - Unsupported actions must use an existing safe draft/recommendation action or return ACTION_NOT_IMPLEMENTED.
@@ -67,7 +73,9 @@ const MARKETING_PROMPT = `You are the user-led Campaign Creative Engine for Shop
 
 Create one complete, cohesive and truthful campaign concept for human review. You do not publish, send, contact customers, change prices, invent offers, or make business mutations.
 
-The user's request is the primary creative direction after safety and truth. First interpret what the user actually wants: the business purpose, desired audience reaction, tone, style, length, use of emojis, whether price or stock should appear, and whether the content should sell directly or simply boost awareness. Explicit instructions such as “funny”, “premium”, “short”, “no emojis”, “do not mention price”, “tell a story”, “not like an advertisement”, or “sell directly” must be followed.
+The user's request is the primary creative direction after safety and truth. First interpret what the user actually wants: the business purpose, product-selection logic, desired audience reaction, tone, style, length, use of emojis, whether price or stock should appear, and whether the content should sell directly or simply boost awareness. Explicit instructions such as “funny”, “premium”, “short”, “no emojis”, “do not mention price”, “tell a story”, “not like an advertisement”, or “sell directly” must be followed.
+
+The backend may supply productSelection explaining why the product was chosen, such as highest stock, clearance candidate, slow-moving product, best seller, high interest with low conversion, requested category, exact named product, or a current Cambodia market-trend opportunity. If verified marketTrendTitle, marketTrendSummary, consumerNeed, recommendedCampaignAngle, or evidenceUrls are supplied, use them as creative context without claiming the trend itself as a product fact. Use the selection reason to shape the campaign strategy, but do not expose negative internal language such as “not selling” to customers unless the user explicitly requests transparency. Clearance selection does not mean a discount exists. Never claim a reduced price, sale, urgency, expiry, or scarcity unless verified facts explicitly provide it.
 
 The final Telegram message is free-form creative copy. It is not a form and must not be forced into repeated sections such as Title, Description, Offer and Call to Action. Do not add headings, labels, bullet points, hashtags, emoji patterns or a hard sales ending unless the user asks for them or they genuinely fit the requested idea.
 
@@ -93,10 +101,58 @@ Truth and safety:
 
 Return the requested structured campaign object. The JSON is only a safety and storage envelope; the Khmer and English campaign messages inside it must remain natural and free-form. Publishing always requires explicit human approval.`;
 
-const PLAN_SCHEMA = {
+const PLAN_INPUT_KEYS = [
+  'productId', 'productIds', 'preferredProductIds', 'category', 'selectionStrategy', 'selectionRequest',
+  'selectionReason', 'selectionCriteria', 'selectionConfidence', 'userRequest', 'requestText', 'campaignGoal',
+  'targetAudience', 'channel', 'creativeMode', 'segmentIds', 'requestedAmount', 'budget', 'amount', 'quantity',
+  'adjustment', 'setTo', 'orderId', 'status', 'reason', 'campaignId', 'recommendationId', 'reservationId',
+  'boostId', 'stage', 'maxProducts', 'force',
+] as const;
+
+const PLAN_INPUT_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['intent', 'summary', 'requiresWorkflow', 'warnings'],
+  required: [...PLAN_INPUT_KEYS],
+  properties: {
+    productId: { type: ['string', 'null'] },
+    productIds: { type: ['array', 'null'], items: { type: 'string' } },
+    preferredProductIds: { type: ['array', 'null'], items: { type: 'string' } },
+    category: { type: ['string', 'null'] },
+    selectionStrategy: { type: ['string', 'null'] },
+    selectionRequest: { type: ['string', 'null'] },
+    selectionReason: { type: ['string', 'null'] },
+    selectionCriteria: { type: ['string', 'null'] },
+    selectionConfidence: { type: ['number', 'null'] },
+    userRequest: { type: ['string', 'null'] },
+    requestText: { type: ['string', 'null'] },
+    campaignGoal: { type: ['string', 'null'] },
+    targetAudience: { type: ['string', 'null'] },
+    channel: { type: ['string', 'null'] },
+    creativeMode: { type: ['string', 'null'] },
+    segmentIds: { type: ['array', 'null'], items: { type: 'string' } },
+    requestedAmount: { type: ['number', 'null'] },
+    budget: { type: ['number', 'null'] },
+    amount: { type: ['number', 'null'] },
+    quantity: { type: ['number', 'null'] },
+    adjustment: { type: ['number', 'null'] },
+    setTo: { type: ['number', 'null'] },
+    orderId: { type: ['string', 'null'] },
+    status: { type: ['string', 'null'] },
+    reason: { type: ['string', 'null'] },
+    campaignId: { type: ['string', 'null'] },
+    recommendationId: { type: ['string', 'null'] },
+    reservationId: { type: ['string', 'null'] },
+    boostId: { type: ['string', 'null'] },
+    stage: { type: ['string', 'null'] },
+    maxProducts: { type: ['number', 'null'] },
+    force: { type: ['boolean', 'null'] },
+  },
+} as const;
+
+export const PLAN_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['intent', 'summary', 'requiresWorkflow', 'warnings', 'clarificationQuestion', 'workflow'],
   properties: {
     intent: { type: 'string' },
     summary: { type: 'string' },
@@ -127,7 +183,7 @@ const PLAN_SCHEMA = {
                   action: { type: 'string' },
                   dependsOn: { type: 'array', items: { type: 'string' } },
                   requiresApproval: { type: 'boolean' },
-                  input: { type: 'object', additionalProperties: true },
+                  input: PLAN_INPUT_SCHEMA,
                 },
               },
             },
@@ -188,6 +244,17 @@ export interface CampaignDraftInput {
   campaignGoal: string;
   userRequest?: string;
   creativeBrief?: CampaignCreativeBrief;
+  productSelection?: {
+    strategy: string;
+    reason: string;
+    criteria: string;
+    confidence: number;
+    marketTrendTitle?: string;
+    marketTrendSummary?: string;
+    consumerNeed?: string;
+    recommendedCampaignAngle?: string;
+    evidenceUrls?: string[];
+  };
   recentCampaigns: RecentCampaignContext[];
   verifiedMemory: Array<{ topic: string; content: string; confidence: number }>;
 }
@@ -281,21 +348,59 @@ function productIdsFromCommand(command: string, context: Record<string, unknown>
   const exactMatches = validProducts.filter((item) => lower.includes(String(item.name).toLowerCase()));
   if (exactMatches.length) return exactMatches.map((item) => String(item.id)).slice(0, 3);
 
-  const genericTokens = new Set(['fresh', 'khmer', 'cambodian', 'kampot', 'whole', 'free', 'range', 'local', 'product']);
-  return validProducts
-    .filter((item) => {
-      const normalized = String(item.name).toLowerCase();
-      const meaningfulTokens = normalized.split(/[^\p{L}\p{N}]+/u).filter((token) => token.length >= 4 && !genericTokens.has(token));
-      return meaningfulTokens.some((token) => lower.includes(token));
+  const genericTokens = new Set([
+    'fresh', 'khmer', 'cambodian', 'kampot', 'whole', 'free', 'range', 'local', 'product', 'products',
+    'fish', 'fishes', 'fruit', 'fruits', 'meat', 'meats', 'sweet', 'sweets', 'handicraft', 'handicrafts',
+  ]);
+  const tokenized = validProducts.map((item) => ({
+    item,
+    tokens: String(item.name).toLowerCase().split(/[^\p{L}\p{N}]+/u).filter((token) => token.length >= 4 && !genericTokens.has(token)),
+  }));
+  const tokenFrequency = new Map<string, number>();
+  for (const entry of tokenized) for (const token of new Set(entry.tokens)) tokenFrequency.set(token, (tokenFrequency.get(token) ?? 0) + 1);
+  return tokenized
+    .filter(({ tokens }) => {
+      const matched = tokens.filter((token) => new RegExp(`\\b${token}\\b`, 'i').test(lower));
+      return matched.length >= 2 || matched.some((token) => tokenFrequency.get(token) === 1);
     })
-    .map((item) => String(item.id))
+    .map(({ item }) => String(item.id))
     .slice(0, 3);
 }
 
 function fallbackPlan(command: string, context: Record<string, unknown>): MainAgentPlan {
   const lower = command.toLowerCase();
   const requestedProductIds = productIdsFromCommand(command, context);
-  if (lower.includes('campaign') || lower.includes('telegram') || lower.includes('advert') || lower.includes('promote')) {
+  const asksForMarketTrend = lower.includes('trend') || lower.includes('market demand') || lower.includes('buyer demand') || lower.includes('what should i boost') || lower.includes('what should we boost') || lower.includes('trending in cambodia') || lower.includes('current demand');
+  const asksForTrendCampaign = asksForMarketTrend && (lower.includes('campaign') || lower.includes('promote') || lower.includes('advert') || lower.includes('create content'));
+  if (asksForMarketTrend && !asksForTrendCampaign) {
+    return {
+      intent: 'discover_cambodia_market_opportunities',
+      summary: 'Search current Cambodia web/media trends and match them to real catalogue, stock, and buyer-demand signals.',
+      requiresWorkflow: true,
+      warnings: ['Market trends are recommendations only. Any publish, price change, or boost activation keeps its normal approval requirement.'],
+      workflow: { name: 'Cambodia daily market intelligence', goal: command, riskLevel: 'low', steps: [
+        { id: 'step_1', skill: 'analytics', action: 'discover_market_opportunities', dependsOn: [], requiresApproval: false, input: { requestText: command, userRequest: command, force: true } },
+      ] },
+    };
+  }
+  if (asksForTrendCampaign) {
+    return {
+      intent: 'trend_led_marketing_campaign',
+      summary: 'Find a current Cambodia market opportunity, create a matching campaign draft, and wait for final publish approval.',
+      requiresWorkflow: true,
+      warnings: ['Trend evidence guides the recommendation; publishing still requires final human approval.'],
+      workflow: { name: 'Cambodia trend-led campaign', goal: command, riskLevel: 'high', steps: [
+        { id: 'step_1', skill: 'analytics', action: 'discover_market_opportunities', dependsOn: [], requiresApproval: false, input: { requestText: command, userRequest: command, force: true } },
+        { id: 'step_2', skill: 'inventory', action: 'check_available_stock', dependsOn: ['step_1'], requiresApproval: false, input: {} },
+        { id: 'step_3', skill: 'finance', action: 'check_campaign_budget', dependsOn: ['step_2'], requiresApproval: false, input: { requestedAmount: 25 } },
+        { id: 'step_4', skill: 'marketing', action: 'create_campaign_draft', dependsOn: ['step_3'], requiresApproval: false, input: { channel: 'telegram', campaignGoal: command, userRequest: command, creativeMode: 'user-led' } },
+        { id: 'step_5', skill: 'marketing', action: 'publish_approved_campaign', dependsOn: ['step_4'], requiresApproval: true, input: {} },
+        { id: 'step_6', skill: 'analytics', action: 'measure_campaign_performance', dependsOn: ['step_5'], requiresApproval: false, input: {} },
+        { id: 'step_7', skill: 'analytics', action: 'learn_from_outcomes', dependsOn: ['step_6'], requiresApproval: false, input: {} },
+      ] },
+    };
+  }
+  if (lower.includes('campaign') || lower.includes('telegram') || lower.includes('advert') || lower.includes('promote') || lower.includes('boost') || lower.includes('sell') || lower.includes('clearance') || lower.includes('clear stock') || lower.includes('move stock') || lower.includes('feature')) {
     return {
       intent: 'create_marketing_campaign',
       summary: 'Prepare a product-specific Telegram campaign draft, compare it with recent campaigns, and wait for final publish approval.',
@@ -306,7 +411,7 @@ function fallbackPlan(command: string, context: Record<string, unknown>): MainAg
         goal: command,
         riskLevel: 'high',
         steps: [
-          { id: 'step_1', skill: 'analytics', action: 'rank_products', dependsOn: [], requiresApproval: false, input: { preferredProductIds: requestedProductIds } },
+          { id: 'step_1', skill: 'analytics', action: 'rank_products', dependsOn: [], requiresApproval: false, input: { preferredProductIds: requestedProductIds, userRequest: command, selectionRequest: command, maxProducts: 1 } },
           { id: 'step_2', skill: 'inventory', action: 'check_available_stock', dependsOn: ['step_1'], requiresApproval: false, input: { productIds: requestedProductIds } },
           { id: 'step_3', skill: 'finance', action: 'check_campaign_budget', dependsOn: ['step_2'], requiresApproval: false, input: { requestedAmount: 25 } },
           { id: 'step_4', skill: 'marketing', action: 'create_campaign_draft', dependsOn: ['step_3'], requiresApproval: false, input: { channel: 'telegram', productIds: requestedProductIds, campaignGoal: command, userRequest: command, creativeMode: 'user-led' } },
@@ -415,9 +520,7 @@ export async function planWithOpenAI(command: string, context: Record<string, un
         format: {
           type: 'json_schema',
           name: 'shopping_cambodia_main_agent_plan',
-          // Non-strict: strict mode forbids the open-ended `input` object on
-          // workflow steps. validatePlan() validates the response afterward.
-          strict: false,
+          strict: true,
           schema: PLAN_SCHEMA,
         },
       },
@@ -774,7 +877,7 @@ function fallbackCampaign(input: CampaignDraftInput): CampaignDraftOutput {
     contentShape: brief.contentShape,
     desiredReaction: brief.desiredReaction,
     creativeAngle: selectedAngle,
-    creativeRationale: `The concept follows the user's requested purpose, tone and format while avoiding recent campaign patterns.`,
+    creativeRationale: `The concept follows the user's requested purpose, tone and format while using the verified product-selection reason: ${input.productSelection?.reason ?? 'the selected product matches the campaign request'}.`,
     kh: selectedCopy.kh,
     en: selectedCopy.en,
     callToAction: selectedCopy.callToAction,
@@ -784,6 +887,7 @@ function fallbackCampaign(input: CampaignDraftInput): CampaignDraftOutput {
       `Tone: ${brief.tone}`,
       `Style: ${brief.contentStyle}`,
       `Format: ${brief.contentShape}`,
+      ...(input.productSelection ? [`Product selection: ${input.productSelection.criteria}`, `Selection reason: ${input.productSelection.reason}`] : []),
       ...brief.mustAvoid.map((item) => `Avoided: ${item}`),
     ],
     variationNotes: [
@@ -791,6 +895,7 @@ function fallbackCampaign(input: CampaignDraftInput): CampaignDraftOutput {
       'Adapts the message shape to the requested purpose and tone',
       'Changes the opening, rhythm and closing from recent campaigns',
       'Uses only verified product facts and explicit user constraints',
+      ...(input.productSelection ? [`Campaign strategy reflects ${input.productSelection.strategy} product selection`] : []),
     ],
     similarityScore: Number(selectedScore.toFixed(3)),
     contentFingerprint: crypto.createHash('sha256').update(`${selectedCopy.kh}\n${selectedCopy.en}`).digest('hex'),
@@ -832,13 +937,9 @@ function parseCampaignOutput(value: unknown): Omit<CampaignDraftOutput, 'similar
   const record = value as Record<string, unknown>;
   const requiredStrings = [
     'campaignName', 'objective', 'userIntent', 'campaignPurpose', 'targetAudience', 'tone', 'contentStyle',
-    'contentShape', 'desiredReaction', 'creativeAngle', 'creativeRationale', 'kh', 'en',
+    'contentShape', 'desiredReaction', 'creativeAngle', 'creativeRationale', 'kh', 'en', 'callToAction',
   ] as const;
   for (const key of requiredStrings) if (typeof record[key] !== 'string' || !String(record[key]).trim()) throw new Error(`Campaign output is missing ${key}.`);
-  // callToAction is optional: the creative brief may intentionally omit a hard
-  // call to action (e.g. a "premium story, not like an ad"). Allow it to be empty.
-  if (record.callToAction != null && typeof record.callToAction !== 'string') throw new Error('Campaign callToAction must be a string.');
-  if (typeof record.callToAction !== 'string') record.callToAction = '';
   if (!Array.isArray(record.productFactsUsed) || !record.productFactsUsed.every((item) => typeof item === 'string')) throw new Error('Campaign product facts are invalid.');
   if (!Array.isArray(record.userLogicMatch) || record.userLogicMatch.length < 2 || !record.userLogicMatch.every((item) => typeof item === 'string')) throw new Error('Campaign user-logic notes are invalid.');
   if (!Array.isArray(record.variationNotes) || record.variationNotes.length < 4 || !record.variationNotes.every((item) => typeof item === 'string')) throw new Error('Campaign variation notes are invalid.');
