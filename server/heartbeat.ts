@@ -1,6 +1,7 @@
 import { agentStore } from './store.js';
 import { calculateInventoryForecasts, calculateProductBoosts, calculateRevenueOpportunities } from './phase2-service.js';
 import { readProducts } from './business-data.js';
+import { runCambodiaMarketIntelligence, shouldRunDailyMarketScan } from './market-intelligence/daily-market-task.js';
 
 let timer: NodeJS.Timeout | undefined;
 
@@ -26,6 +27,14 @@ export async function runHeartbeat(actor = 'system') {
     if (fresh.heartbeat.checks.productBoosts) calculateProductBoosts();
     if (fresh.heartbeat.checks.predictiveInventory && fresh.controls.predictiveInventoryEnabled) calculateInventoryForecasts();
     if (fresh.controls.revenueOptimizationEnabled) calculateRevenueOpportunities();
+    if (fresh.heartbeat.checks.marketTrends && shouldRunDailyMarketScan()) {
+      try {
+        const market = await runCambodiaMarketIntelligence({ actor });
+        if (!market.skipped) findings.push(`Cambodia market scan generated ${market.recommendations?.length ?? 0} boost recommendations.`);
+      } catch (error) {
+        findings.push(`Cambodia market scan failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
 
     agentStore.mutate((draft) => {
       draft.heartbeat.lastRunAt = new Date().toISOString();
