@@ -8,14 +8,12 @@ import {
   readOrders,
   readProducts,
   readReservations,
-  refreshBusinessDataFromFirestore,
   writeBudget,
+  writeOrders,
   writeProducts,
   writeReservations,
 } from './business-data.js';
-import { fetchTelegramSubscribers } from './firestore.js';
 import { draftCampaignContent, planWithOpenAI } from './openai-service.js';
-import type { TelegramSubscriber } from './types.js';
 import {
   calculateCustomerSegments,
   calculateDynamicPricing,
@@ -42,6 +40,66 @@ function asNumber(value: unknown, fallback = 0): number {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function stableHash(value: unknown): string {
+  const normalize = (input: unknown): unknown => {
+    if (Array.isArray(input)) return input.map(normalize);
+    if (input && typeof input === 'object') {
+      return Object.fromEntries(Object.entries(input as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => [key, normalize(item)]));
+    }
+    return input;
+  };
+  return crypto.createHash('sha256').update(JSON.stringify(normalize(value))).digest('hex');
+}
+
+function actionDefinition(skill: SkillId, action: string) {
+  return agentStore.getState().skills.find((item) => item.id === skill)?.actions.find((item) => item.id === action);
+}
+
+function approvedStepApproval(workflow: Workflow, step: WorkflowStep): ApprovalRequest | undefined {
+  if (!step.approvalId) return undefined;
+  const approval = agentStore.findApproval(step.approvalId);
+  if (!approval || approval.status !== 'approved') return undefined;
+  if (approval.workflowId !== workflow.id || approval.stepId !== step.id) return undefined;
+  if (approval.payloadHash !== stableHash(step.input)) return undefined;
+  return approval;
+}
+
+function protectedActionInputError(step: WorkflowStep): string | undefined {
+  const value = step.input;
+  switch (step.action) {
+    case 'publish_approved_campaign':
+      return typeof value.campaignId === 'string' && value.campaignId ? undefined : 'A campaign draft is required before publish approval.';
+    case 'apply_approved_price':
+      return typeof value.recommendationId === 'string' && value.recommendationId ? undefined : 'An exact pricing recommendation is required before approval.';
+    case 'adjust_inventory':
+      if (typeof value.productId !== 'string' || !value.productId) return 'An exact productId is required before inventory approval.';
+      if (!Number.isFinite(Number(value.adjustment)) && !Number.isFinite(Number(value.setTo))) return 'Provide an exact numeric adjustment or setTo value before inventory approval.';
+      return undefined;
+    case 'reserve_stock':
+      if (typeof value.productId !== 'string' || !value.productId) return 'An exact productId is required before stock reservation approval.';
+      if (!Number.isFinite(Number(value.quantity)) || Number(value.quantity) <= 0) return 'A positive quantity is required before stock reservation approval.';
+      return undefined;
+    case 'release_stock':
+      return typeof value.reservationId === 'string' && value.reservationId ? undefined : 'An exact reservationId is required before release approval.';
+    case 'issue_approved_refund':
+      if (typeof value.orderId !== 'string' || !value.orderId) return 'An exact orderId is required before refund approval.';
+      if (!Number.isFinite(Number(value.amount)) || Number(value.amount) <= 0) return 'A positive exact refund amount is required before approval.';
+      return undefined;
+    case 'change_order_status':
+      if (typeof value.orderId !== 'string' || !value.orderId) return 'An exact orderId is required before status-change approval.';
+      if (!['processing', 'shipped', 'delivered', 'cancelled'].includes(String(value.status))) return 'A valid exact target status is required before approval.';
+      return undefined;
+    case 'reserve_budget':
+      return Number.isFinite(Number(value.amount)) && Number(value.amount) > 0 ? undefined : 'A positive exact budget amount is required before approval.';
+    case 'activate_product_boost':
+      return typeof value.boostId === 'string' && value.boostId ? undefined : 'An exact boostId is required before approval.';
+    case 'create_shipment':
+      return typeof value.orderId === 'string' && value.orderId ? undefined : 'An exact orderId is required before shipment approval.';
+    default:
+      return undefined;
+  }
+}
+
 function success(skill: SkillId, action: string, summary: string, data: Record<string, unknown> = {}, warnings: string[] = []): SkillResult {
   return { success: true, skill, action, summary, data, warnings, requiresApproval: false };
 }
@@ -51,36 +109,12 @@ function fail(skill: SkillId, action: string, code: string, message: string): Sk
 }
 
 function getDependencyOutputs(workflow: Workflow, step: WorkflowStep): Record<string, unknown> {
-  // Collect outputs transitively across all ancestor steps, not just the direct
-  // dependsOn parents. This lets a downstream step (e.g. publish) read an output
-  // produced further upstream (e.g. the campaign draft) even when the plan wires
-  // the steps in a longer chain.
   const outputs: Record<string, unknown> = {};
-  const visited = new Set<string>();
-  const stack = [...step.dependsOn];
-  while (stack.length) {
-    const dependencyId = stack.pop();
-    if (!dependencyId || visited.has(dependencyId)) continue;
-    visited.add(dependencyId);
-    const dep = workflow.steps.find((item) => item.id === dependencyId);
-    if (!dep) continue;
-    if (dep.output) outputs[dependencyId] = dep.output;
-    stack.push(...dep.dependsOn);
+  for (const dependency of step.dependsOn) {
+    const dep = workflow.steps.find((item) => item.id === dependency);
+    if (dep?.output) outputs[dependency] = dep.output;
   }
   return outputs;
-}
-
-// Resolve the campaign a step should act on. A workflow creates exactly one
-// campaign draft, so that campaign is authoritative — this ignores any invented
-// campaignId the planner may put in the step input/dependencies, which was
-// causing "Campaign was not found" at the publish step.
-function resolveWorkflowCampaignId(
-  workflow: Workflow,
-  input: Record<string, unknown>,
-  dependencies: Record<string, unknown>,
-): string | undefined {
-  return agentStore.getState().campaigns.find((campaign) => campaign.workflowId === workflow.id)?.id
-    ?? findCampaignId(input, dependencies);
 }
 
 function findProductIds(input: Record<string, unknown>, dependencyOutputs: Record<string, unknown>): string[] {
@@ -126,16 +160,24 @@ function createApproval(workflow: Workflow, step: WorkflowStep, options: {
   rollbackPossible?: boolean;
   resourceId?: string;
   resourceVersion?: number;
+  riskLevel?: 'medium' | 'high';
 }): ApprovalRequest {
-  const existing = agentStore.getState().approvals.find((approval) => approval.workflowId === workflow.id && approval.stepId === step.id && approval.status === 'pending');
+  const payloadHash = stableHash(step.input);
+  const existing = agentStore.getState().approvals.find((approval) =>
+    approval.workflowId === workflow.id
+    && approval.stepId === step.id
+    && approval.status === 'pending'
+    && approval.payloadHash === payloadHash,
+  );
   if (existing) return existing;
+  const definition = actionDefinition(step.skill, step.action);
   const approval: ApprovalRequest = {
     id: id('approval'),
     workflowId: workflow.id,
     stepId: step.id,
     skill: step.skill,
     action: step.action,
-    riskLevel: 'high',
+    riskLevel: options.riskLevel ?? (definition?.riskLevel === 'medium' ? 'medium' : 'high'),
     status: 'pending',
     summary: options.summary,
     expectedEffect: options.expectedEffect,
@@ -147,6 +189,7 @@ function createApproval(workflow: Workflow, step: WorkflowStep, options: {
     expiresAt: new Date(Date.now() + 72 * 60 * 60 * 1000).toISOString(),
     resourceId: options.resourceId,
     resourceVersion: options.resourceVersion,
+    payloadHash,
   };
   agentStore.mutate((draft) => {
     draft.approvals.unshift(approval);
@@ -155,8 +198,13 @@ function createApproval(workflow: Workflow, step: WorkflowStep, options: {
   return approval;
 }
 
+
 async function executeSkill(workflow: Workflow, step: WorkflowStep): Promise<SkillResult> {
   agentStore.assertSkillEnabled(step.skill, step.action);
+  const definition = actionDefinition(step.skill, step.action);
+  if (definition?.approvalRequired && !approvedStepApproval(workflow, step)) {
+    return fail(step.skill, step.action, 'EXACT_APPROVAL_REQUIRED', 'This action requires a valid human approval for the exact current input.');
+  }
   const state = agentStore.getState();
   if (state.controls.automationPaused) return fail(step.skill, step.action, 'AUTOMATION_PAUSED', 'Automation is paused by an administrator.');
   const dependencies = getDependencyOutputs(workflow, step);
@@ -220,7 +268,7 @@ async function executeSkill(workflow: Workflow, step: WorkflowStep): Promise<Ski
 
     case 'analytics:measure_campaign_performance':
     case 'marketing:measure_campaign_result': {
-      const campaignId = resolveWorkflowCampaignId(workflow, input, dependencies);
+      const campaignId = findCampaignId(input, dependencies);
       const campaign = state.campaigns.find((item) => item.id === campaignId) ?? state.campaigns[0];
       if (!campaign) return fail(step.skill, step.action, 'CAMPAIGN_NOT_FOUND', 'No campaign is available to measure.');
       const attempted = campaign.sentCount + campaign.failedCount + campaign.skippedCount;
@@ -235,7 +283,7 @@ async function executeSkill(workflow: Workflow, step: WorkflowStep): Promise<Ski
     }
 
     case 'analytics:learn_from_outcomes': {
-      const campaignId = resolveWorkflowCampaignId(workflow, input, dependencies);
+      const campaignId = findCampaignId(input, dependencies);
       if (!campaignId) return fail(step.skill, step.action, 'CAMPAIGN_NOT_FOUND', 'No campaign result was supplied for learning.');
       learnFromCampaign(campaignId);
       return success(step.skill, step.action, 'Verified campaign outcome was stored in long-term agent memory.', { campaignId });
@@ -272,6 +320,28 @@ async function executeSkill(workflow: Workflow, step: WorkflowStep): Promise<Ski
       reservation.releasedAt = now();
       writeReservations(reservations);
       return success(step.skill, step.action, 'Stock reservation released.', { reservationId });
+    }
+
+
+    case 'inventory:adjust_inventory': {
+      const productId = String(input.productId ?? '');
+      const products = readProducts();
+      const product = products.find((item) => item.id === productId);
+      if (!product) return fail(step.skill, step.action, 'PRODUCT_NOT_FOUND', 'An exact productId is required for inventory adjustment.');
+      const previousStock = product.stock;
+      const hasSetTo = input.setTo !== undefined && Number.isFinite(Number(input.setTo));
+      const hasAdjustment = input.adjustment !== undefined && Number.isFinite(Number(input.adjustment));
+      if (!hasSetTo && !hasAdjustment) return fail(step.skill, step.action, 'INVALID_INVENTORY_CHANGE', 'Provide either setTo or adjustment as a number.');
+      const nextStock = hasSetTo ? Math.trunc(Number(input.setTo)) : previousStock + Math.trunc(Number(input.adjustment));
+      if (nextStock < 0) return fail(step.skill, step.action, 'NEGATIVE_STOCK_NOT_ALLOWED', 'Inventory cannot be adjusted below zero.');
+      product.stock = nextStock;
+      writeProducts(products);
+      return success(step.skill, step.action, 'Approved inventory adjustment applied.', {
+        productId,
+        previousStock,
+        newStock: nextStock,
+        reason: String(input.reason ?? 'Approved inventory correction'),
+      });
     }
 
     case 'inventory:predict_inventory': {
@@ -391,8 +461,37 @@ async function executeSkill(workflow: Workflow, step: WorkflowStep): Promise<Ski
     case 'support:escalate_ticket':
       return success(step.skill, step.action, 'Support escalation recorded.', { escalationId: id('support_escalation') });
 
-    case 'support:prepare_refund_request':
-      return success(step.skill, step.action, 'Refund request prepared for human review. No money was moved.', { refundRequestId: id('refund_request') });
+    case 'support:prepare_refund_request': {
+      const orderId = typeof input.orderId === 'string' ? input.orderId : '';
+      const amount = Number.isFinite(Number(input.amount)) ? Number(input.amount) : undefined;
+      const order = orderId ? readOrders().find((item) => item.id === orderId) : undefined;
+      if (orderId && !order) return fail(step.skill, step.action, 'ORDER_NOT_FOUND', 'The supplied order was not found.');
+      if (amount !== undefined && amount <= 0) return fail(step.skill, step.action, 'INVALID_REFUND_AMOUNT', 'Refund amount must be greater than zero.');
+      if (order && amount !== undefined && amount > order.totalAmount) return fail(step.skill, step.action, 'REFUND_EXCEEDS_ORDER', 'Refund amount cannot exceed the order total.');
+      return success(step.skill, step.action, 'Refund request prepared for human review. No money was moved.', {
+        refundRequestId: id('refund_request'),
+        orderId: order?.id ?? (orderId || undefined),
+        amount,
+        currency: 'USD',
+        reason: String(input.reason ?? input.requestText ?? 'Refund requested by admin'),
+      }, !orderId || amount === undefined ? ['Order ID and exact amount are still required before a refund can be issued.'] : []);
+    }
+
+    case 'support:issue_approved_refund': {
+      const dependencyRefund = Object.values(dependencies).find((value) => value && typeof value === 'object' && ('refundRequestId' in (value as Record<string, unknown>))) as Record<string, unknown> | undefined;
+      const orderId = String(input.orderId ?? dependencyRefund?.orderId ?? '');
+      const amount = asNumber(input.amount ?? dependencyRefund?.amount, 0);
+      const reason = String(input.reason ?? dependencyRefund?.reason ?? 'Approved customer refund');
+      const order = readOrders().find((item) => item.id === orderId);
+      if (!order) return fail(step.skill, step.action, 'ORDER_NOT_FOUND', 'An exact valid orderId is required to issue a refund.');
+      if (amount <= 0 || amount > order.totalAmount) return fail(step.skill, step.action, 'INVALID_REFUND_AMOUNT', 'Refund amount must be greater than zero and no more than the order total.');
+      try {
+        const result = await issuePaymentRefund({ orderId, amount, reason, customerEmail: order.customerEmail });
+        return success(step.skill, step.action, 'Payment provider confirmed the approved refund request.', { orderId, amount, reason, providerRefundId: result.refundId, providerStatus: result.status });
+      } catch (error) {
+        return fail(step.skill, step.action, 'REFUND_PROVIDER_FAILED', error instanceof Error ? error.message : String(error));
+      }
+    }
 
     case 'logistics:validate_fulfillment': {
       const orderId = String(input.orderId ?? '');
@@ -419,11 +518,34 @@ async function executeSkill(workflow: Workflow, step: WorkflowStep): Promise<Ski
     case 'logistics:report_delivery_exception':
       return success(step.skill, step.action, 'Delivery exception recorded.', { exceptionId: id('delivery_exception') });
 
+
+    case 'logistics:change_order_status': {
+      const orderId = String(input.orderId ?? '');
+      const targetStatus = String(input.status ?? '');
+      const orders = readOrders();
+      const order = orders.find((item) => item.id === orderId);
+      if (!order) return fail(step.skill, step.action, 'ORDER_NOT_FOUND', 'An exact valid orderId is required.');
+      const transitions: Record<string, string[]> = {
+        pending: ['processing', 'cancelled'],
+        processing: ['shipped', 'cancelled'],
+        shipped: ['delivered'],
+        delivered: [],
+        cancelled: [],
+      };
+      if (!transitions[order.status]?.includes(targetStatus)) {
+        return fail(step.skill, step.action, 'INVALID_ORDER_TRANSITION', `Order cannot move from ${order.status} to ${targetStatus}.`);
+      }
+      const previousStatus = order.status;
+      order.status = targetStatus as typeof order.status;
+      writeOrders(orders);
+      return success(step.skill, step.action, 'Approved order status change applied.', { orderId, previousStatus, newStatus: order.status, reason: String(input.reason ?? 'Approved order workflow update') });
+    }
+
     case 'marketing:prepare_telegram_message':
       return success(step.skill, step.action, 'Telegram message draft prepared without sending.', { messageEn: 'Reviewable Shopping Cambodia campaign message.', messageKh: 'សារផ្សព្វផ្សាយ Shopping Cambodia សម្រាប់ពិនិត្យ។' });
 
     case 'marketing:validate_campaign': {
-      const campaignId = resolveWorkflowCampaignId(workflow, input, dependencies);
+      const campaignId = findCampaignId(input, dependencies);
       const campaign = agentStore.getState().campaigns.find((item) => item.id === campaignId);
       if (!campaign) return fail(step.skill, step.action, 'CAMPAIGN_NOT_FOUND', 'Campaign was not found.');
       const products = readProducts().filter((product) => campaign.productIds.includes(product.id));
@@ -438,22 +560,85 @@ async function executeSkill(workflow: Workflow, step: WorkflowStep): Promise<Ski
     case 'marketing:create_campaign_draft': {
       const products = readProducts();
       const productIds = findProductIds(input, dependencies).slice(0, 3);
-      const selected = productIds.length ? products.filter((product) => productIds.includes(product.id)) : products.filter((product) => product.status === 'active' && availableToPromise(product) > 0).slice(0, 3);
+      const selected = productIds.length
+        ? products.filter((product) => productIds.includes(product.id))
+        : products.filter((product) => product.status === 'active' && availableToPromise(product) > 0).slice(0, 3);
       if (!selected.length) return fail(step.skill, step.action, 'NO_ELIGIBLE_PRODUCTS', 'No eligible products are available for a campaign.');
+      if (selected.some((product) => availableToPromise(product) <= 0)) return fail(step.skill, step.action, 'OUT_OF_STOCK_PRODUCT', 'Campaign drafts cannot include products with no available stock.');
+
       const requestedBudget = findBudget(input, dependencies);
-      const content = await draftCampaignContent({ productNames: selected.map((product) => product.name), audience: 'consented Telegram subscribers', budget: requestedBudget });
-      const subscribers = await getCampaignSubscribers();
+      const currentState = agentStore.getState();
+      const selectedIds = new Set(selected.map((product) => product.id));
+      const recentCampaigns = currentState.campaigns
+        .filter((campaign) => campaign.productIds.some((productId) => selectedIds.has(productId)))
+        .slice(0, 12)
+        .map((campaign) => ({
+          id: campaign.id,
+          name: campaign.name,
+          creativeAngle: campaign.creativeAngle ?? 'unknown',
+          callToAction: campaign.callToAction ?? '',
+          telegramMessageEn: campaign.telegramMessageEn,
+          telegramMessageKh: campaign.telegramMessageKh,
+          contentFingerprint: campaign.contentFingerprint,
+          campaignPurpose: campaign.campaignPurpose,
+          tone: campaign.tone,
+          contentStyle: campaign.contentStyle,
+          contentShape: campaign.contentShape,
+        }));
+      const verifiedMemory = currentState.memories
+        .filter((memory) => memory.confidence >= 0.5 && (memory.type === 'outcome' || memory.type === 'learning'))
+        .slice(0, 12)
+        .map((memory) => ({ topic: memory.topic, content: memory.content, confidence: memory.confidence }));
+      const userRequest = String(input.userRequest ?? input.campaignGoal ?? workflow.goal ?? `Promote ${selected.map((product) => product.name).join(', ')}`);
+      const campaignGoal = String(input.campaignGoal ?? userRequest);
+      const requestedAudience = typeof input.targetAudience === 'string' && input.targetAudience.trim()
+        ? input.targetAudience.trim()
+        : 'consented Telegram subscribers in the selected segments';
+      const content = await draftCampaignContent({
+        products: selected.map((product) => ({
+          id: product.id,
+          name: product.name,
+          description: product.description,
+          category: product.category,
+          price: product.price,
+          stock: availableToPromise(product),
+          unit: product.unit,
+        })),
+        audience: requestedAudience,
+        budget: requestedBudget,
+        campaignGoal,
+        userRequest,
+        recentCampaigns,
+        verifiedMemory,
+      });
+      const subscribers = currentState.telegramSubscribers;
       const segments = Array.isArray(input.segmentIds) ? input.segmentIds.filter((item): item is string => typeof item === 'string') : ['all-consented'];
       const eligibleCount = subscribers.filter((subscriber) => isSubscriberEligible(subscriber, segments)).length;
       const campaign: Campaign = {
         id: id('campaign'),
-        name: `Smart boost: ${selected.map((product) => product.name).join(', ')}`,
+        name: content.campaignName,
         status: 'awaiting_review',
         version: 1,
         productIds: selected.map((product) => product.id),
         segmentIds: segments,
         telegramMessageKh: content.kh,
         telegramMessageEn: content.en,
+        objective: content.objective,
+        userRequest: content.userIntent,
+        campaignPurpose: content.campaignPurpose,
+        targetAudience: content.targetAudience,
+        tone: content.tone,
+        contentStyle: content.contentStyle,
+        contentShape: content.contentShape,
+        desiredReaction: content.desiredReaction,
+        creativeAngle: content.creativeAngle,
+        creativeRationale: content.creativeRationale,
+        callToAction: content.callToAction,
+        productFactsUsed: content.productFactsUsed,
+        userLogicMatch: content.userLogicMatch,
+        variationNotes: content.variationNotes,
+        similarityScore: content.similarityScore,
+        contentFingerprint: content.contentFingerprint,
         estimatedRecipientCount: eligibleCount,
         budget: requestedBudget,
         createdAt: now(),
@@ -468,11 +653,24 @@ async function executeSkill(workflow: Workflow, step: WorkflowStep): Promise<Ski
         draft.campaigns.unshift(campaign);
       });
       workflow.relatedRecords.push(campaign.id);
-      return success(step.skill, step.action, 'Campaign draft created. No Telegram messages were sent.', { campaignId: campaign.id, campaignVersion: campaign.version, campaign, contentSource: content.source });
+      return success(step.skill, step.action, 'A product-specific campaign draft was created and compared with recent campaigns. No Telegram messages were sent.', {
+        campaignId: campaign.id,
+        campaignVersion: campaign.version,
+        campaign,
+        contentSource: content.source,
+        creativeAngle: content.creativeAngle,
+        campaignPurpose: content.campaignPurpose,
+        tone: content.tone,
+        contentStyle: content.contentStyle,
+        contentShape: content.contentShape,
+        userLogicMatch: content.userLogicMatch,
+        similarityScore: content.similarityScore,
+      }, content.similarityScore > 0.62 ? ['The draft has moderate similarity to a recent campaign and should be reviewed carefully.'] : []);
     }
 
+
     case 'marketing:publish_approved_campaign': {
-      const campaignId = resolveWorkflowCampaignId(workflow, input, dependencies);
+      const campaignId = findCampaignId(input, dependencies);
       if (!campaignId) return fail(step.skill, step.action, 'CAMPAIGN_NOT_FOUND', 'A campaign draft is required.');
       const campaign = agentStore.getState().campaigns.find((item) => item.id === campaignId);
       if (!campaign) return fail(step.skill, step.action, 'CAMPAIGN_NOT_FOUND', 'Campaign was not found.');
@@ -542,17 +740,24 @@ function isSubscriberEligible(subscriber: import('./types.js').TelegramSubscribe
   return subscriber.isActive && subscriber.isSubscribed && subscriber.marketingConsent && !subscriber.unsubscribedAt && segmentMatch && frequencyAllowed;
 }
 
-// Campaign audience = users captured in the storefront's Firestore telegramChats
-// collection, merged with any subscribers stored in the agent state. Deduped by
-// chatId (Firestore wins).
-async function getCampaignSubscribers(): Promise<TelegramSubscriber[]> {
-  const stateSubscribers = agentStore.getState().telegramSubscribers;
-  const firestoreSubscribers = await fetchTelegramSubscribers();
-  const byChatId = new Map<string, TelegramSubscriber>();
-  for (const subscriber of [...stateSubscribers, ...firestoreSubscribers]) {
-    byChatId.set(subscriber.chatId, subscriber);
-  }
-  return [...byChatId.values()];
+async function issuePaymentRefund(input: { orderId: string; amount: number; reason: string; customerEmail: string }): Promise<{ refundId: string; status: string }> {
+  const endpoint = process.env.PAYMENT_REFUND_ENDPOINT;
+  const token = process.env.PAYMENT_REFUND_TOKEN;
+  if (!endpoint || !token) throw new Error('Payment refund provider is not configured. Set PAYMENT_REFUND_ENDPOINT and PAYMENT_REFUND_TOKEN.');
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+      'Idempotency-Key': `refund:${input.orderId}:${input.amount.toFixed(2)}`,
+    },
+    body: JSON.stringify(input),
+  });
+  const payload = await response.json().catch(() => ({})) as Record<string, unknown>;
+  if (!response.ok) throw new Error(typeof payload.error === 'string' ? payload.error : `Refund provider returned ${response.status}.`);
+  const refundId = String(payload.refundId ?? payload.id ?? '');
+  if (!refundId) throw new Error('Refund provider did not return a refund identifier.');
+  return { refundId, status: String(payload.status ?? 'confirmed') };
 }
 
 async function sendTelegram(chatId: string, text: string): Promise<{ messageId: string }> {
@@ -571,7 +776,8 @@ async function sendTelegram(chatId: string, text: string): Promise<{ messageId: 
 
 async function publishTelegramCampaign(campaign: Campaign, approvalId: string): Promise<SkillResult> {
   if (!['approved', 'awaiting_review'].includes(campaign.status)) return fail('marketing', 'publish_approved_campaign', 'INVALID_CAMPAIGN_STATE', `Campaign cannot publish from ${campaign.status}.`);
-  const subscribers = await getCampaignSubscribers();
+  const state = agentStore.getState();
+  const subscribers = state.telegramSubscribers;
   const eligible = subscribers.filter((subscriber) => isSubscriberEligible(subscriber, campaign.segmentIds));
   agentStore.mutate((draft) => {
     const target = draft.campaigns.find((item) => item.id === campaign.id);
@@ -646,24 +852,19 @@ async function publishTelegramCampaign(campaign: Campaign, approvalId: string): 
   return success('marketing', 'publish_approved_campaign', `Telegram campaign sent to ${sent} recipients.`, { campaignId: campaign.id, sent, failed, skipped, duplicatePrevented, status: finalStatus }, failed ? ['Some recipient sends failed.'] : []);
 }
 
-export async function createWorkflowFromCommand(command: string, actor: string): Promise<{ workflow: Workflow | null; plan: MainAgentPlan; source: string }> {
+export async function createWorkflowFromCommand(command: string, actor: string): Promise<{ workflow: Workflow; plan: MainAgentPlan; source: string }> {
   const state = agentStore.getState();
   if (!state.controls.brainEnabled) throw Object.assign(new Error('Main Agent brain is disabled.'), { code: 'BRAIN_DISABLED' });
-  // Pull the latest inventory from Firestore so stock answers reflect reality.
-  await refreshBusinessDataFromFirestore();
   const context = {
     products: readProducts().map((product) => ({ id: product.id, name: product.name, stock: product.stock, price: product.price, status: product.status })),
     orderCount: readOrders().length,
     pendingApprovalCount: state.approvals.filter((item) => item.status === 'pending').length,
     enabledSkills: state.skills.filter((skill) => skill.enabled).map((skill) => ({ id: skill.id, enabledActions: skill.actions.filter((action) => action.enabled).map((action) => action.id) })),
+    recentCampaigns: state.campaigns.slice(0, 10).map((campaign) => ({ id: campaign.id, name: campaign.name, productIds: campaign.productIds, creativeAngle: campaign.creativeAngle, callToAction: campaign.callToAction, status: campaign.status })),
+    approvalPolicy: state.skills.flatMap((skill) => skill.actions.filter((action) => action.approvalRequired).map((action) => ({ skill: skill.id, action: action.id, riskLevel: action.riskLevel }))),
   };
   const { plan, source } = await planWithOpenAI(command, context);
-  // Informational or clarifying requests (e.g. "check the stock for durian") do
-  // not need a multi-step workflow. Return the agent's answer instead of failing.
-  if (!plan.requiresWorkflow || !plan.workflow) {
-    agentStore.addAudit({ actor, actorRole: 'admin', action: 'main_agent_answer', inputSummary: command, resultSummary: plan.clarificationQuestion ?? plan.summary, success: true });
-    return { workflow: null, plan, source };
-  }
+  if (!plan.requiresWorkflow || !plan.workflow) throw new Error(plan.clarificationQuestion ?? 'The Main Agent did not produce an executable workflow.');
 
   const workflowId = id('workflow');
   const workflow: Workflow = {
@@ -676,13 +877,17 @@ export async function createWorkflowFromCommand(command: string, actor: string):
     createdBy: actor,
     createdAt: now(),
     relatedRecords: [],
-    steps: plan.workflow.steps.map((item) => ({
-      ...item,
-      workflowId,
-      status: 'pending',
-      attempt: 0,
-      idempotencyKey: `${workflowId}:${item.skill}:${item.action}:${item.id}`,
-    })),
+    steps: plan.workflow.steps.map((item) => {
+      const definition = state.skills.find((skill) => skill.id === item.skill)?.actions.find((action) => action.id === item.action);
+      return {
+        ...item,
+        requiresApproval: Boolean(item.requiresApproval || definition?.approvalRequired),
+        workflowId,
+        status: 'pending' as const,
+        attempt: 0,
+        idempotencyKey: `${workflowId}:${item.skill}:${item.action}:${item.id}`,
+      };
+    }),
   };
   agentStore.mutate((draft) => {
     draft.workflows.unshift(workflow);
@@ -729,20 +934,46 @@ export async function runWorkflow(workflowId: string, actor = 'system'): Promise
         continue;
       }
 
-      if (stepSnapshot.requiresApproval) {
+      const definition = actionDefinition(stepSnapshot.skill, stepSnapshot.action);
+      const policyRequiresApproval = Boolean(stepSnapshot.requiresApproval || definition?.approvalRequired);
+      const existingApproved = approvedStepApproval(workflow, stepSnapshot);
+      if (policyRequiresApproval && !existingApproved) {
         const dependencyOutputs = getDependencyOutputs(workflow, stepSnapshot);
-        // Resolve the campaign the same way the publish step will, so the approval
-        // records the real campaign id/version and the version check passes.
-        const campaignId = resolveWorkflowCampaignId(workflow, stepSnapshot.input, dependencyOutputs);
+        const campaignId = findCampaignId(stepSnapshot.input, dependencyOutputs);
         const recommendationId = findRecommendationId(dependencyOutputs);
         agentStore.mutate((draft) => {
           const wf = draft.workflows.find((item) => item.id === workflowId)!;
           const step = wf.steps.find((item) => item.id === stepSnapshot.id)!;
+
+          if (campaignId) step.input = { ...step.input, campaignId };
+          if (recommendationId) step.input = { ...step.input, recommendationId };
+          for (const output of Object.values(dependencyOutputs)) {
+            if (!output || typeof output !== 'object') continue;
+            const record = output as Record<string, unknown>;
+            if (step.action === 'issue_approved_refund') {
+              step.input = {
+                ...step.input,
+                ...(typeof record.orderId === 'string' ? { orderId: record.orderId } : {}),
+                ...(Number.isFinite(Number(record.amount)) ? { amount: Number(record.amount) } : {}),
+                ...(typeof record.reason === 'string' ? { reason: record.reason } : {}),
+              };
+            }
+          }
+
+          const inputError = protectedActionInputError(step);
+          if (inputError) {
+            step.status = 'failed';
+            step.error = { code: 'APPROVAL_INPUT_INCOMPLETE', message: inputError };
+            normalizeWorkflowStatus(wf);
+            return;
+          }
+
           let options: Parameters<typeof createApproval>[2] = {
             summary: `${step.skill}: ${step.action}`,
-            expectedEffect: 'Execute a controlled high-risk business action.',
+            expectedEffect: 'Execute a controlled business mutation using the exact reviewed input.',
             dataAffected: [],
             rollbackPossible: false,
+            riskLevel: definition?.riskLevel === 'medium' ? 'medium' : 'high',
           };
           if (campaignId) {
             const campaign = draft.campaigns.find((item) => item.id === campaignId);
@@ -755,6 +986,7 @@ export async function runWorkflow(workflowId: string, actor = 'system'): Promise
               rollbackPossible: false,
               resourceId: campaign?.id,
               resourceVersion: campaign?.version,
+              riskLevel: 'high',
             };
           } else if (recommendationId) {
             const recommendation = draft.pricingRecommendations.find((item) => item.id === recommendationId);
@@ -764,6 +996,44 @@ export async function runWorkflow(workflowId: string, actor = 'system'): Promise
               dataAffected: ['products', 'pricingRecommendations'],
               rollbackPossible: true,
               resourceId: recommendation?.id,
+              riskLevel: 'high',
+            };
+          } else if (step.action === 'adjust_inventory') {
+            options = {
+              summary: `Adjust inventory for ${String(step.input.productId ?? 'selected product')}`,
+              expectedEffect: step.input.setTo !== undefined ? `Set stock to ${String(step.input.setTo)}.` : `Change stock by ${String(step.input.adjustment ?? 'the reviewed amount')}.`,
+              dataAffected: ['products', 'inventory'],
+              rollbackPossible: true,
+              resourceId: typeof step.input.productId === 'string' ? step.input.productId : undefined,
+              riskLevel: 'high',
+            };
+          } else if (step.action === 'change_order_status') {
+            options = {
+              summary: `Change order status for ${String(step.input.orderId ?? 'selected order')}`,
+              expectedEffect: `Move the order to ${String(step.input.status ?? 'the reviewed status')}.`,
+              dataAffected: ['orders'],
+              rollbackPossible: false,
+              resourceId: typeof step.input.orderId === 'string' ? step.input.orderId : undefined,
+              riskLevel: 'high',
+            };
+          } else if (step.action === 'issue_approved_refund') {
+            options = {
+              summary: `Issue refund for ${String(step.input.orderId ?? 'selected order')}`,
+              expectedEffect: `Request a $${asNumber(step.input.amount, 0).toFixed(2)} refund from the configured payment provider.`,
+              estimatedCost: asNumber(step.input.amount, 0),
+              dataAffected: ['payment provider', 'order refund audit'],
+              rollbackPossible: false,
+              resourceId: typeof step.input.orderId === 'string' ? step.input.orderId : undefined,
+              riskLevel: 'high',
+            };
+          } else if (step.action === 'reserve_stock' || step.action === 'release_stock') {
+            options = {
+              summary: step.action === 'reserve_stock' ? 'Reserve product stock' : 'Release a stock reservation',
+              expectedEffect: 'Change available-to-promise inventory using the reviewed reservation data.',
+              dataAffected: ['inventory reservations', 'available stock'],
+              rollbackPossible: true,
+              resourceId: typeof step.input.productId === 'string' ? step.input.productId : typeof step.input.reservationId === 'string' ? step.input.reservationId : undefined,
+              riskLevel: 'medium',
             };
           }
           const approval = createApproval(wf, step, options);
@@ -774,6 +1044,7 @@ export async function runWorkflow(workflowId: string, actor = 'system'): Promise
         madeProgress = true;
         break;
       }
+
 
       await executeWorkflowStep(workflowId, stepSnapshot.id, actor);
       madeProgress = true;
@@ -857,6 +1128,21 @@ export async function decideApproval(approvalId: string, status: 'approved' | 'r
   if (!approval) throw new Error('Approval not found.');
   if (approval.status !== 'pending') throw new Error('Approval has already been decided.');
   if (new Date(approval.expiresAt).getTime() <= Date.now()) throw new Error('Approval has expired.');
+  if (actor === 'system' || actor === 'main-agent' || actor.startsWith('agent:')) {
+    throw Object.assign(new Error('The AI agent cannot approve its own proposed action.'), { code: 'SELF_APPROVAL_FORBIDDEN' });
+  }
+  const currentWorkflow = agentStore.getState().workflows.find((item) => item.id === approval.workflowId);
+  const currentStep = currentWorkflow?.steps.find((item) => item.id === approval.stepId);
+  if (!currentStep) throw new Error('Approval workflow step was not found.');
+  if (approval.payloadHash !== stableHash(currentStep.input)) {
+    throw Object.assign(new Error('The action input changed after approval was requested. Request a new approval.'), { code: 'APPROVAL_PAYLOAD_MISMATCH' });
+  }
+  if (status === 'approved' && approval.resourceVersion !== undefined && approval.resourceId) {
+    const campaign = agentStore.getState().campaigns.find((item) => item.id === approval.resourceId);
+    if (campaign && campaign.version !== approval.resourceVersion) {
+      throw Object.assign(new Error('The campaign changed after approval was requested. Request a new approval for the current version.'), { code: 'APPROVAL_VERSION_MISMATCH' });
+    }
+  }
 
   agentStore.mutate((draft) => {
     const target = draft.approvals.find((item) => item.id === approvalId)!;
@@ -869,7 +1155,6 @@ export async function decideApproval(approvalId: string, status: 'approved' | 'r
     if (step) {
       if (status === 'approved') {
         step.status = 'pending';
-        step.requiresApproval = false;
         if (target.action === 'publish_approved_campaign' && target.resourceId) {
           const campaign = draft.campaigns.find((item) => item.id === target.resourceId);
           if (campaign && campaign.version === target.resourceVersion) {
@@ -883,7 +1168,6 @@ export async function decideApproval(approvalId: string, status: 'approved' | 'r
           if (recommendation) {
             recommendation.status = 'approved';
             recommendation.approvalId = target.id;
-            step.input = { ...step.input, recommendationId: recommendation.id };
           }
         }
       } else {
@@ -938,12 +1222,17 @@ export function createBoostApproval(boostId: string, actor: string): ApprovalReq
   return approval;
 }
 
-export function updateCampaignDraft(campaignId: string, patch: Partial<Pick<Campaign, 'name' | 'telegramMessageKh' | 'telegramMessageEn' | 'segmentIds' | 'budget' | 'scheduledAt'>>): Campaign {
+export function updateCampaignDraft(campaignId: string, patch: Partial<Pick<Campaign, 'name' | 'telegramMessageKh' | 'telegramMessageEn' | 'segmentIds' | 'budget' | 'scheduledAt' | 'objective' | 'campaignPurpose' | 'targetAudience' | 'tone' | 'contentStyle' | 'contentShape' | 'desiredReaction' | 'creativeAngle' | 'creativeRationale' | 'callToAction'>>): Campaign {
   return agentStore.mutate((draft) => {
     const campaign = draft.campaigns.find((item) => item.id === campaignId);
     if (!campaign) throw new Error('Campaign not found.');
     if (!['draft', 'awaiting_review', 'rejected'].includes(campaign.status)) throw new Error('Only reviewable campaigns may be edited.');
     Object.assign(campaign, patch);
+    campaign.contentFingerprint = crypto.createHash('sha256').update(`${campaign.telegramMessageKh}
+${campaign.telegramMessageEn}`).digest('hex');
+    if (patch.telegramMessageKh !== undefined || patch.telegramMessageEn !== undefined) {
+      campaign.variationNotes = [...(campaign.variationNotes ?? []), 'Content was manually edited during admin review.'];
+    }
     campaign.version += 1;
     campaign.status = 'awaiting_review';
     campaign.approvalId = undefined;
