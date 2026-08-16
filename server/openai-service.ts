@@ -832,9 +832,13 @@ function parseCampaignOutput(value: unknown): Omit<CampaignDraftOutput, 'similar
   const record = value as Record<string, unknown>;
   const requiredStrings = [
     'campaignName', 'objective', 'userIntent', 'campaignPurpose', 'targetAudience', 'tone', 'contentStyle',
-    'contentShape', 'desiredReaction', 'creativeAngle', 'creativeRationale', 'kh', 'en', 'callToAction',
+    'contentShape', 'desiredReaction', 'creativeAngle', 'creativeRationale', 'kh', 'en',
   ] as const;
   for (const key of requiredStrings) if (typeof record[key] !== 'string' || !String(record[key]).trim()) throw new Error(`Campaign output is missing ${key}.`);
+  // callToAction is optional: the creative brief may intentionally omit a hard
+  // call to action (e.g. a "premium story, not like an ad"). Allow it to be empty.
+  if (record.callToAction != null && typeof record.callToAction !== 'string') throw new Error('Campaign callToAction must be a string.');
+  if (typeof record.callToAction !== 'string') record.callToAction = '';
   if (!Array.isArray(record.productFactsUsed) || !record.productFactsUsed.every((item) => typeof item === 'string')) throw new Error('Campaign product facts are invalid.');
   if (!Array.isArray(record.userLogicMatch) || record.userLogicMatch.length < 2 || !record.userLogicMatch.every((item) => typeof item === 'string')) throw new Error('Campaign user-logic notes are invalid.');
   if (!Array.isArray(record.variationNotes) || record.variationNotes.length < 4 || !record.variationNotes.every((item) => typeof item === 'string')) throw new Error('Campaign variation notes are invalid.');
