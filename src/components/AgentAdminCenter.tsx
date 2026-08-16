@@ -99,11 +99,10 @@ function formatTime(value?: string) {
 
 export default function AgentAdminCenter({ products, onShowNotification }: Props) {
   const [state, setState] = useState<AgentState | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<Tab>('main');
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
-  const [command, setCommand] = useState('Create a Telegram campaign for low-selling products with healthy stock.');
+  const [command, setCommand] = useState('Boost Kampot Durian with a short playful curiosity campaign for young adults. No emojis, do not mention price, and do not use a hard sell.');
   const [lastPlan, setLastPlan] = useState<any>(null);
   const [expandedWorkflow, setExpandedWorkflow] = useState<string | null>(null);
   const [editingCampaign, setEditingCampaign] = useState<Campaign | null>(null);
@@ -112,19 +111,9 @@ export default function AgentAdminCenter({ products, onShowNotification }: Props
   const refresh = async () => {
     setLoading(true);
     try {
-      const data = await agentApi.state();
-      // Guard against a missing/misconfigured backend returning a non-AgentState
-      // payload (e.g. an SPA index.html fallback), which would otherwise crash the
-      // whole admin page when the render reads state.skills / state.approvals.
-      if (!data || !Array.isArray((data as AgentState).skills) || !Array.isArray((data as AgentState).approvals)) {
-        throw new Error('The AI agent backend is not reachable. Configure VITE_API_BASE_URL to point at the deployed server.');
-      }
-      setState(data);
-      setLoadError(null);
+      setState(await agentApi.state());
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Could not load agent system.';
-      setLoadError(message);
-      onShowNotification(message, 'error');
+      onShowNotification(error instanceof Error ? error.message : 'Could not load agent system.', 'error');
     } finally {
       setLoading(false);
     }
@@ -155,7 +144,7 @@ export default function AgentAdminCenter({ products, onShowNotification }: Props
     try {
       const result = await agentApi.plan(command.trim());
       setLastPlan(result);
-      onShowNotification(result?.workflow?.id ? 'Main Agent created and started the workflow.' : 'Main Agent responded.', 'success');
+      onShowNotification('Main Agent created and started the workflow.', 'success');
       await refresh();
       if (result?.workflow?.id) setExpandedWorkflow(result.workflow.id);
     } catch (error) {
@@ -173,30 +162,7 @@ export default function AgentAdminCenter({ products, onShowNotification }: Props
   if (loading && !state) {
     return <div className="flex min-h-72 items-center justify-center"><Loader2 className="h-7 w-7 animate-spin text-emerald-600" /></div>;
   }
-  if (!state) {
-    return (
-      <div className="flex min-h-72 items-center justify-center">
-        <div className="max-w-lg rounded-2xl border border-amber-200 bg-amber-50 p-8 text-center">
-          <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full border border-amber-200 bg-white">
-            <CircleOff className="h-7 w-7 text-amber-600" />
-          </div>
-          <h3 className="mb-2 text-lg font-bold text-gray-900">AI Agent backend not connected</h3>
-          <p className="mb-5 text-xs leading-relaxed text-gray-600">
-            {loadError ?? 'The agent system could not be reached.'} The rest of the admin dashboard
-            (Analytics, Inventory, Orders, Categories) works without it.
-          </p>
-          <button
-            onClick={() => void refresh()}
-            disabled={loading}
-            className="inline-flex items-center gap-2 rounded-lg bg-amber-600 px-4 py-2 text-sm font-semibold text-white hover:bg-amber-500 disabled:opacity-50"
-          >
-            {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
-            Retry connection
-          </button>
-        </div>
-      </div>
-    );
-  }
+  if (!state) return null;
 
   return (
     <div className="space-y-6">
@@ -249,7 +215,7 @@ export default function AgentAdminCenter({ products, onShowNotification }: Props
               <textarea value={command} onChange={(event) => setCommand(event.target.value)} rows={4} className="w-full resize-none rounded-xl border border-gray-200 bg-white p-3 text-sm outline-none focus:ring-2 focus:ring-emerald-500/20" placeholder="Tell the Main Agent what the business should achieve..." />
               <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <div className="flex flex-wrap gap-2">
-                  {['Prepare a daily business summary', 'Predict products that need restocking', 'Find revenue optimization opportunities'].map((item) => <button key={item} onClick={() => setCommand(item)} className="rounded-full border border-gray-200 bg-white px-3 py-1.5 text-[11px] text-gray-600 hover:border-emerald-300 hover:text-emerald-700">{item}</button>)}
+                  {['Create a premium story campaign for Kampot Durian aimed at families', 'Prepare a daily business summary', 'Predict products that need restocking', 'Find revenue optimization opportunities'].map((item) => <button key={item} onClick={() => setCommand(item)} className="rounded-full border border-gray-200 bg-white px-3 py-1.5 text-[11px] text-gray-600 hover:border-emerald-300 hover:text-emerald-700">{item}</button>)}
                 </div>
                 <button onClick={submitCommand} disabled={busy === 'plan' || !state.controls.brainEnabled} className="inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50">
                   {busy === 'plan' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />} Create Workflow
@@ -258,7 +224,7 @@ export default function AgentAdminCenter({ products, onShowNotification }: Props
             </div>
             {lastPlan && (
               <div className="mt-4 rounded-2xl border border-emerald-100 bg-emerald-50 p-4">
-                <div className="flex items-start gap-3"><Sparkles className="mt-0.5 h-5 w-5 text-emerald-600" /><div><p className="text-sm font-bold text-emerald-900">{lastPlan.plan?.summary}</p>{lastPlan.plan?.clarificationQuestion && <p className="mt-1 text-xs text-emerald-800">{lastPlan.plan.clarificationQuestion}</p>}<p className="mt-1 text-xs text-emerald-700">Planner source: {lastPlan.source}{lastPlan.workflow?.name ? `. Workflow: ${lastPlan.workflow.name}` : ' · No workflow needed for this request.'}</p></div></div>
+                <div className="flex items-start gap-3"><Sparkles className="mt-0.5 h-5 w-5 text-emerald-600" /><div><p className="text-sm font-bold text-emerald-900">{lastPlan.plan?.summary}</p><p className="mt-1 text-xs text-emerald-700">Planner source: {lastPlan.source}. Workflow: {lastPlan.workflow?.name}</p></div></div>
               </div>
             )}
             <div className="mt-6 space-y-3">
@@ -305,7 +271,9 @@ export default function AgentAdminCenter({ products, onShowNotification }: Props
               <Card key={campaign.id}>
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between"><div><div className="flex items-center gap-2"><h4 className="font-bold text-gray-900">{campaign.name}</h4><Badge status={campaign.status} /></div><p className="mt-1 text-xs text-gray-500">Version {campaign.version} · {campaign.productIds.length} products · estimated {campaign.estimatedRecipientCount} eligible recipients</p></div><button onClick={() => setEditingCampaign({ ...campaign })} className="rounded-lg border border-gray-200 px-3 py-2 text-xs font-semibold text-gray-600 hover:bg-gray-50">Review / Edit</button></div>
                 <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">{[['Sent', campaign.sentCount], ['Failed', campaign.failedCount], ['Skipped', campaign.skippedCount], ['Duplicates blocked', campaign.duplicatePreventedCount]].map(([label, value]) => <div key={label} className="rounded-xl bg-gray-50 p-3"><div className="text-lg font-bold text-gray-900">{value}</div><div className="text-[10px] uppercase tracking-wide text-gray-400">{label}</div></div>)}</div>
-                <div className="mt-4 rounded-xl bg-gray-50 p-3"><p className="text-[10px] font-bold uppercase text-gray-400">English Telegram message</p><p className="mt-1 whitespace-pre-wrap text-xs leading-5 text-gray-700">{campaign.telegramMessageEn}</p></div>
+                <div className="mt-4 rounded-xl border border-violet-100 bg-violet-50 p-3"><p className="text-[10px] font-bold uppercase text-violet-700">User creative logic</p><p className="mt-1 text-xs font-semibold leading-5 text-violet-950">{campaign.userRequest || campaign.objective}</p><p className="mt-2 text-[11px] leading-5 text-violet-800">Purpose: {campaign.campaignPurpose} · Audience: {campaign.targetAudience}</p></div>
+                <div className="mt-3 grid gap-3 md:grid-cols-3"><div className="rounded-xl bg-emerald-50 p-3"><p className="text-[10px] font-bold uppercase text-emerald-700">One creative concept</p><p className="mt-1 text-xs font-semibold text-emerald-950">{campaign.creativeAngle || 'Not recorded'}</p><p className="mt-1 text-[11px] leading-5 text-emerald-800">{campaign.creativeRationale}</p></div><div className="rounded-xl bg-amber-50 p-3"><p className="text-[10px] font-bold uppercase text-amber-700">Creative execution</p><p className="mt-1 text-xs font-semibold text-amber-950">{campaign.tone}</p><p className="mt-1 text-[11px] leading-5 text-amber-800">{campaign.contentStyle} · {campaign.contentShape}</p></div><div className="rounded-xl bg-blue-50 p-3"><p className="text-[10px] font-bold uppercase text-blue-700">Originality check</p><p className="mt-1 text-xs font-semibold text-blue-950">{Math.round((campaign.similarityScore ?? 0) * 100)}% similarity to recent campaigns</p><p className="mt-1 text-[11px] leading-5 text-blue-800">Desired reaction: {campaign.desiredReaction}</p></div></div>
+                <div className="mt-4 rounded-xl bg-gray-50 p-3"><div className="flex items-center justify-between gap-3"><p className="text-[10px] font-bold uppercase text-gray-400">Final English creative · free-form</p><span className="text-[10px] text-gray-400">CTA metadata: {campaign.callToAction || 'none'}</span></div><p className="mt-1 whitespace-pre-wrap text-xs leading-5 text-gray-700">{campaign.telegramMessageEn}</p></div>
               </Card>
             ))}
           </div>
@@ -320,7 +288,7 @@ export default function AgentAdminCenter({ products, onShowNotification }: Props
       )}
 
       {editingCampaign && (
-        <CampaignEditor campaign={editingCampaign} onClose={() => setEditingCampaign(null)} onChange={setEditingCampaign} onSave={async () => { await doAction(`campaign-${editingCampaign.id}`, () => agentApi.updateCampaign(editingCampaign.id, { name: editingCampaign.name, telegramMessageKh: editingCampaign.telegramMessageKh, telegramMessageEn: editingCampaign.telegramMessageEn, segmentIds: editingCampaign.segmentIds, budget: editingCampaign.budget }), 'Campaign saved as a new review version.'); setEditingCampaign(null); }} />
+        <CampaignEditor campaign={editingCampaign} onClose={() => setEditingCampaign(null)} onChange={setEditingCampaign} onSave={async () => { await doAction(`campaign-${editingCampaign.id}`, () => agentApi.updateCampaign(editingCampaign.id, { name: editingCampaign.name, objective: editingCampaign.objective, campaignPurpose: editingCampaign.campaignPurpose, targetAudience: editingCampaign.targetAudience, tone: editingCampaign.tone, contentStyle: editingCampaign.contentStyle, contentShape: editingCampaign.contentShape, desiredReaction: editingCampaign.desiredReaction, creativeAngle: editingCampaign.creativeAngle, creativeRationale: editingCampaign.creativeRationale, callToAction: editingCampaign.callToAction, telegramMessageKh: editingCampaign.telegramMessageKh, telegramMessageEn: editingCampaign.telegramMessageEn, segmentIds: editingCampaign.segmentIds, budget: editingCampaign.budget }), 'Campaign saved as a new review version.'); setEditingCampaign(null); }} />
       )}
 
       {activeTab === 'system' && (
@@ -395,7 +363,7 @@ function ApprovalCard({ approval, busy, onDecision }: { approval: ApprovalReques
 }
 
 function CampaignEditor({ campaign, onChange, onSave, onClose }: { campaign: Campaign; onChange: (campaign: Campaign) => void; onSave: () => void; onClose: () => void }) {
-  return <div className="fixed inset-0 z-50 flex items-center justify-center bg-gray-950/60 p-4 backdrop-blur-sm"><div className="max-h-[92vh] w-full max-w-3xl overflow-y-auto rounded-3xl bg-white p-6 shadow-2xl"><div className="flex items-start justify-between"><div><h3 className="text-xl font-bold text-gray-900">Campaign review</h3><p className="text-xs text-gray-500">Editing creates a new version and invalidates any previous approval.</p></div><button onClick={onClose} className="rounded-full bg-gray-100 p-2"><X className="h-4 w-4" /></button></div><div className="mt-5 space-y-4"><label className="block text-xs font-bold text-gray-600">Name<input value={campaign.name} onChange={(e) => onChange({ ...campaign, name: e.target.value })} className="mt-1 w-full rounded-xl border border-gray-200 p-3 text-sm" /></label><label className="block text-xs font-bold text-gray-600">Khmer Telegram message<textarea rows={5} value={campaign.telegramMessageKh} onChange={(e) => onChange({ ...campaign, telegramMessageKh: e.target.value })} className="mt-1 w-full rounded-xl border border-gray-200 p-3 text-sm" /></label><label className="block text-xs font-bold text-gray-600">English Telegram message<textarea rows={5} value={campaign.telegramMessageEn} onChange={(e) => onChange({ ...campaign, telegramMessageEn: e.target.value })} className="mt-1 w-full rounded-xl border border-gray-200 p-3 text-sm" /></label><label className="block text-xs font-bold text-gray-600">Budget (USD)<input type="number" value={campaign.budget} onChange={(e) => onChange({ ...campaign, budget: Number(e.target.value) })} className="mt-1 w-full rounded-xl border border-gray-200 p-3 text-sm" /></label></div><div className="mt-6 flex justify-end gap-3"><button onClick={onClose} className="rounded-xl border border-gray-200 px-4 py-2.5 text-sm font-semibold text-gray-600">Cancel</button><button onClick={onSave} className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white"><Save className="h-4 w-4" />Save review version</button></div></div></div>;
+  return <div className="fixed inset-0 z-50 flex items-center justify-center bg-gray-950/60 p-4 backdrop-blur-sm"><div className="max-h-[92vh] w-full max-w-4xl overflow-y-auto rounded-3xl bg-white p-6 shadow-2xl"><div className="flex items-start justify-between"><div><h3 className="text-xl font-bold text-gray-900">User-led campaign review</h3><p className="text-xs text-gray-500">The message is free-form. Strategy fields explain how it follows the user's request. Editing creates a new version and invalidates previous approval.</p></div><button onClick={onClose} className="rounded-full bg-gray-100 p-2"><X className="h-4 w-4" /></button></div><div className="mt-5 rounded-2xl bg-violet-50 p-4"><p className="text-[10px] font-bold uppercase text-violet-700">Original user request</p><p className="mt-1 whitespace-pre-wrap text-sm leading-6 text-violet-950">{campaign.userRequest}</p></div><div className="mt-5 grid gap-4 md:grid-cols-2"><label className="block text-xs font-bold text-gray-600">Campaign name<input value={campaign.name} onChange={(e) => onChange({ ...campaign, name: e.target.value })} className="mt-1 w-full rounded-xl border border-gray-200 p-3 text-sm" /></label><label className="block text-xs font-bold text-gray-600">Business purpose<input value={campaign.campaignPurpose} onChange={(e) => onChange({ ...campaign, campaignPurpose: e.target.value })} className="mt-1 w-full rounded-xl border border-gray-200 p-3 text-sm" /></label><label className="block text-xs font-bold text-gray-600">Target audience<input value={campaign.targetAudience} onChange={(e) => onChange({ ...campaign, targetAudience: e.target.value })} className="mt-1 w-full rounded-xl border border-gray-200 p-3 text-sm" /></label><label className="block text-xs font-bold text-gray-600">Tone<input value={campaign.tone} onChange={(e) => onChange({ ...campaign, tone: e.target.value })} className="mt-1 w-full rounded-xl border border-gray-200 p-3 text-sm" /></label><label className="block text-xs font-bold text-gray-600">Creative style<input value={campaign.contentStyle} onChange={(e) => onChange({ ...campaign, contentStyle: e.target.value })} className="mt-1 w-full rounded-xl border border-gray-200 p-3 text-sm" /></label><label className="block text-xs font-bold text-gray-600">One creative concept<input value={campaign.creativeAngle} onChange={(e) => onChange({ ...campaign, creativeAngle: e.target.value })} className="mt-1 w-full rounded-xl border border-gray-200 p-3 text-sm" /></label></div><div className="mt-4 space-y-4"><label className="block text-xs font-bold text-gray-600">Objective<textarea rows={2} value={campaign.objective} onChange={(e) => onChange({ ...campaign, objective: e.target.value })} className="mt-1 w-full rounded-xl border border-gray-200 p-3 text-sm" /></label><label className="block text-xs font-bold text-gray-600">Creative rationale<textarea rows={2} value={campaign.creativeRationale} onChange={(e) => onChange({ ...campaign, creativeRationale: e.target.value })} className="mt-1 w-full rounded-xl border border-gray-200 p-3 text-sm" /></label><label className="block text-xs font-bold text-gray-600">Khmer final creative · free-form<textarea rows={7} value={campaign.telegramMessageKh} onChange={(e) => onChange({ ...campaign, telegramMessageKh: e.target.value })} className="mt-1 w-full rounded-xl border border-gray-200 p-3 text-sm" /></label><label className="block text-xs font-bold text-gray-600">English final creative · free-form<textarea rows={7} value={campaign.telegramMessageEn} onChange={(e) => onChange({ ...campaign, telegramMessageEn: e.target.value })} className="mt-1 w-full rounded-xl border border-gray-200 p-3 text-sm" /></label><div className="grid gap-4 md:grid-cols-2"><label className="block text-xs font-bold text-gray-600">Call-to-action metadata<input value={campaign.callToAction} onChange={(e) => onChange({ ...campaign, callToAction: e.target.value })} className="mt-1 w-full rounded-xl border border-gray-200 p-3 text-sm" /></label><label className="block text-xs font-bold text-gray-600">Budget (USD)<input type="number" value={campaign.budget} onChange={(e) => onChange({ ...campaign, budget: Number(e.target.value) })} className="mt-1 w-full rounded-xl border border-gray-200 p-3 text-sm" /></label></div></div><div className="mt-6 flex justify-end gap-3"><button onClick={onClose} className="rounded-xl border border-gray-200 px-4 py-2.5 text-sm font-semibold text-gray-600">Cancel</button><button onClick={onSave} className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white"><Save className="h-4 w-4" />Save review version</button></div></div></div>;
 }
 
 function Metric({ label, value }: { label: string; value: string }) { return <div className="rounded-xl bg-gray-50 p-3"><div className="text-sm font-bold text-gray-900">{value}</div><div className="mt-1 text-[9px] font-bold uppercase tracking-wide text-gray-400">{label}</div></div>; }
