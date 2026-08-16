@@ -13,6 +13,47 @@ const app = express();
 // Falling back to 3000 keeps local development unchanged.
 const PORT = Number(process.env.PORT) || 3000;
 
+const allowedOrigins = (
+  process.env.ALLOWED_ORIGINS ||
+  'https://shoppingcambodia-taupe.vercel.app,http://localhost:5173'
+)
+  .split(',')
+  .map(origin => origin.trim())
+  .filter(Boolean);
+
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+
+  if (origin && allowedOrigins.includes(origin)) {
+    res.header('Access-Control-Allow-Origin', origin);
+    res.header('Vary', 'Origin');
+  }
+
+  res.header(
+    'Access-Control-Allow-Methods',
+    'GET, POST, PUT, PATCH, DELETE, OPTIONS'
+  );
+
+  res.header(
+    'Access-Control-Allow-Headers',
+    [
+      'Content-Type',
+      'Authorization',
+      'X-Admin-Key',
+      'X-Admin-User',
+      'X-Admin-Role',
+    ].join(', ')
+  );
+
+  res.header('Access-Control-Allow-Credentials', 'true');
+
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(204);
+  }
+
+  next();
+});
+
 // Enable JSON parsing
 app.use(express.json());
 
