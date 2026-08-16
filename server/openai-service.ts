@@ -497,7 +497,15 @@ function fallbackPlan(command: string, context: Record<string, unknown>): MainAg
 export async function planWithOpenAI(command: string, context: Record<string, unknown>): Promise<{ plan: MainAgentPlan; source: 'openai' | 'fallback' | 'cache' }> {
   const cacheKey = `brain:${crypto.createHash('sha256').update(`${command}:${JSON.stringify(context)}`).digest('hex')}`;
   const cached = agentStore.getCache(cacheKey);
-  if (cached) return { plan: validatePlan(cached), source: 'cache' };
+  if (cached) {
+    // A stale/old-format cached plan must not permanently break a command:
+    // if it no longer validates, discard it and regenerate below.
+    try {
+      return { plan: validatePlan(cached), source: 'cache' };
+    } catch (error) {
+      console.warn('Discarding invalid cached plan:', error instanceof Error ? error.message : error);
+    }
+  }
 
   if (!process.env.OPENAI_API_KEY) {
     const plan = fallbackPlan(command, context);
