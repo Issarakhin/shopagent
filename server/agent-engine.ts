@@ -988,8 +988,8 @@ export async function createWorkflowFromCommand(command: string, actor: string):
     pendingApprovalCount: state.approvals.filter((item) => item.status === 'pending').length,
     enabledSkills: state.skills.filter((skill) => skill.enabled).map((skill) => ({ id: skill.id, enabledActions: skill.actions.filter((action) => action.enabled).map((action) => action.id) })),
     recentCampaigns: state.campaigns.slice(0, 10).map((campaign) => ({ id: campaign.id, name: campaign.name, productIds: campaign.productIds, creativeAngle: campaign.creativeAngle, callToAction: campaign.callToAction, status: campaign.status })),
-    latestCambodiaMarketRecommendations: state.dailyBoostRecommendations.slice(0, 5).map((item) => ({ productId: item.productId, productName: item.productName, score: item.score, confidence: item.confidence, trendTitle: item.trendTitle, selectionReason: item.selectionReason })),
-    latestCambodiaMarketTrends: state.marketTrends.slice(0, 8).map((item) => ({ id: item.id, title: item.title, direction: item.direction, confidence: item.confidence, matchedProductIds: item.matchedProductIds, matchedCategories: item.matchedCategories })),
+    latestCambodiaMarketRecommendations: (state.dailyBoostRecommendations ?? []).slice(0, 5).map((item) => ({ productId: item.productId, productName: item.productName, score: item.score, confidence: item.confidence, trendTitle: item.trendTitle, selectionReason: item.selectionReason })),
+    latestCambodiaMarketTrends: (state.marketTrends ?? []).slice(0, 8).map((item) => ({ id: item.id, title: item.title, direction: item.direction, confidence: item.confidence, matchedProductIds: item.matchedProductIds, matchedCategories: item.matchedCategories })),
     approvalPolicy: state.skills.flatMap((skill) => skill.actions.filter((action) => action.approvalRequired).map((action) => ({ skill: skill.id, action: action.id, riskLevel: action.riskLevel }))),
   };
   const { plan, source } = await planWithOpenAI(command, context);
