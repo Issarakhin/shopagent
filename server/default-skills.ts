@@ -82,6 +82,7 @@ export const DEFAULT_SKILLS: SkillDefinition[] = [
   skill('analytics', 'Analytics', 'Produces evidence-based summaries, rankings, anomaly checks, and campaign measurement.', [
     action('generate_sales_summary', 'Generate sales summary', 'Summarize sales and order performance.'),
     action('rank_products', 'Rank products', 'Rank products by smart boost opportunity.'),
+    action('discover_market_opportunities', 'Discover market opportunities', 'Surface Cambodia market trends and boost opportunities.'),
     action('detect_anomaly', 'Detect anomaly', 'Detect unusual order, revenue, or stock patterns.'),
     action('measure_campaign_performance', 'Measure campaign performance', 'Evaluate campaign delivery and response.'),
     action('learn_from_outcomes', 'Learn from outcomes', 'Store verified lessons and update recommendation weights.'),
