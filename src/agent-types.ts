@@ -78,18 +78,10 @@ export interface Campaign {
   telegramMessageKh: string;
   telegramMessageEn: string;
   objective: string;
-  userRequest: string;
-  campaignPurpose: string;
-  targetAudience: string;
-  tone: string;
-  contentStyle: string;
-  contentShape: string;
-  desiredReaction: string;
   creativeAngle: string;
   creativeRationale: string;
   callToAction: string;
   productFactsUsed: string[];
-  userLogicMatch: string[];
   variationNotes: string[];
   similarityScore: number;
   contentFingerprint: string;
@@ -112,6 +104,74 @@ export interface ProductBoost {
   updatedAt: string;
 }
 
+
+export interface MarketTrendEvidence {
+  title: string;
+  url: string;
+  source: string;
+  publishedAt?: string;
+  relevance: string;
+}
+
+export interface MarketTrendSignal {
+  id: string;
+  runId?: string;
+  market: 'Cambodia';
+  title: string;
+  summary: string;
+  consumerNeed: string;
+  whyNow: string;
+  direction: 'rising' | 'steady' | 'seasonal' | 'emerging' | 'uncertain';
+  confidence: number;
+  keywords: string[];
+  matchedCategories: string[];
+  matchedProductIds: string[];
+  recommendedAngles: string[];
+  evidence: MarketTrendEvidence[];
+  discoveredAt: string;
+  windowDays: number;
+}
+
+export interface DailyBoostRecommendation {
+  id: string;
+  runId?: string;
+  productId: string;
+  productName: string;
+  category: string;
+  market: 'Cambodia';
+  opportunityType: 'seasonal_demand' | 'rising_demand' | 'market_fit';
+  score: number;
+  confidence: number;
+  trendId: string;
+  trendTitle: string;
+  trendSummary: string;
+  consumerNeed: string;
+  stock: number;
+  unit: string;
+  demandMomentum: number;
+  conversionRate7d: number;
+  sold30d: number;
+  selectionReason: string;
+  recommendedCampaignAngle: string;
+  evidence: MarketTrendEvidence[];
+  generatedAt: string;
+  status: 'recommended' | 'used' | 'dismissed';
+}
+
+export interface MarketIntelligenceRun {
+  id: string;
+  market: 'Cambodia';
+  cambodiaDate: string;
+  status: 'running' | 'completed' | 'failed';
+  request: string;
+  startedAt: string;
+  completedAt?: string;
+  trendCount: number;
+  recommendationCount: number;
+  summary?: string;
+  error?: string;
+}
+
 export interface AgentState {
   version: number;
   controls: {
@@ -122,6 +182,7 @@ export interface AgentState {
     segmentationEnabled: boolean;
     revenueOptimizationEnabled: boolean;
     predictiveInventoryEnabled: boolean;
+    marketIntelligenceEnabled: boolean;
   };
   skills: SkillDefinition[];
   workflows: Workflow[];
@@ -146,4 +207,8 @@ export interface AgentState {
   customerSegments: Array<Record<string, any>>;
   inventoryForecasts: Array<Record<string, any>>;
   revenueOpportunities: Array<Record<string, any>>;
+  marketIntelligenceRuns: MarketIntelligenceRun[];
+  marketTrends: MarketTrendSignal[];
+  dailyBoostRecommendations: DailyBoostRecommendation[];
 }
+
