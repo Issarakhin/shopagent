@@ -278,6 +278,21 @@ export interface AgentControls {
   segmentationEnabled: boolean;
   revenueOptimizationEnabled: boolean;
   predictiveInventoryEnabled: boolean;
+  marketIntelligenceEnabled?: boolean;
+}
+
+export interface MarketIntelligenceRun {
+  id: string;
+  market: string;
+  cambodiaDate: string;
+  status: 'running' | 'completed' | 'failed';
+  request: string;
+  startedAt: string;
+  completedAt?: string;
+  trendCount: number;
+  recommendationCount: number;
+  summary?: string;
+  error?: string;
 }
 
 export interface StoreEvent {
@@ -391,4 +406,7 @@ export interface AgentState {
   customerSegments: CustomerSegment[];
   inventoryForecasts: InventoryForecast[];
   revenueOpportunities: RevenueOpportunity[];
+  marketIntelligenceRuns: MarketIntelligenceRun[];
+  marketTrends: any[];
+  dailyBoostRecommendations: any[];
 }

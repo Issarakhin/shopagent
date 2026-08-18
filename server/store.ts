@@ -30,6 +30,7 @@ export function createInitialAgentState(): AgentState {
       segmentationEnabled: true,
       revenueOptimizationEnabled: true,
       predictiveInventoryEnabled: true,
+      marketIntelligenceEnabled: true,
     },
     skills: structuredClone(DEFAULT_SKILLS),
     workflows: [],
@@ -59,6 +60,9 @@ export function createInitialAgentState(): AgentState {
     customerSegments: [],
     inventoryForecasts: [],
     revenueOpportunities: [],
+    marketIntelligenceRuns: [],
+    marketTrends: [],
+    dailyBoostRecommendations: [],
   };
 }
 
@@ -120,6 +124,9 @@ function normalizeState(raw: Partial<AgentState>): AgentState {
     customerSegments: raw.customerSegments ?? [],
     inventoryForecasts: raw.inventoryForecasts ?? [],
     revenueOpportunities: raw.revenueOpportunities ?? [],
+    marketIntelligenceRuns: raw.marketIntelligenceRuns ?? [],
+    marketTrends: raw.marketTrends ?? [],
+    dailyBoostRecommendations: raw.dailyBoostRecommendations ?? [],
   };
 }
 
