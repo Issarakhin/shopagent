@@ -101,26 +101,6 @@ function formatTime(value?: string) {
   return new Date(value).toLocaleString();
 }
 
-// Guarantee every array/object field the UI reads actually exists, so a partial
-// or unexpected API response can never white-screen the admin panel.
-function normalizeAgentState(raw: any): AgentState {
-  const state = (raw && typeof raw === 'object') ? raw : {};
-  const arrayFields = [
-    'skills', 'workflows', 'approvals', 'campaigns', 'executions', 'auditLogs', 'memories',
-    'boosts', 'cache', 'telegramSubscribers', 'pricingRecommendations', 'customerSegments',
-    'inventoryForecasts', 'revenueOpportunities', 'events', 'dailyBoostRecommendations',
-    'marketTrends',
-  ];
-  for (const field of arrayFields) {
-    if (!Array.isArray(state[field])) state[field] = [];
-  }
-  state.controls = state.controls && typeof state.controls === 'object' ? state.controls : {};
-  state.heartbeat = state.heartbeat && typeof state.heartbeat === 'object'
-    ? { ...state.heartbeat, checks: state.heartbeat.checks ?? {} }
-    : { enabled: false, intervalMinutes: 0, checks: {} };
-  return state as AgentState;
-}
-
 export default function AgentAdminCenter({ products, onShowNotification }: Props) {
   const [state, setState] = useState<AgentState | null>(null);
   const [activeTab, setActiveTab] = useState<Tab>('main');
@@ -135,7 +115,7 @@ export default function AgentAdminCenter({ products, onShowNotification }: Props
   const refresh = async () => {
     setLoading(true);
     try {
-      setState(normalizeAgentState(await agentApi.state()));
+      setState(await agentApi.state());
     } catch (error) {
       onShowNotification(error instanceof Error ? error.message : 'Could not load agent system.', 'error');
     } finally {
@@ -396,7 +376,7 @@ export default function AgentAdminCenter({ products, onShowNotification }: Props
                   <p className="mt-3 text-xs leading-5 text-gray-600">{item.selectionReason}</p>
                   <div className="mt-3 rounded-xl bg-violet-50 p-3"><p className="text-[10px] font-bold uppercase text-violet-700">Recommended campaign angle</p><p className="mt-1 text-xs font-semibold text-violet-950">{item.recommendedCampaignAngle}</p></div>
                   <div className="mt-3 flex flex-wrap gap-3 text-[10px] font-semibold text-gray-500"><span>Confidence {Math.round(item.confidence * 100)}%</span><span>Demand momentum {item.demandMomentum.toFixed(2)}</span><span>30d sold {item.sold30d}</span></div>
-                  {(item.evidence?.length ?? 0) > 0 && <div className="mt-3 flex flex-wrap gap-2">{(item.evidence ?? []).slice(0, 3).map((source) =><a key={source.url} href={source.url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 rounded-full border border-gray-200 px-2.5 py-1 text-[10px] font-semibold text-gray-600 hover:border-emerald-300 hover:text-emerald-700">{source.source}<ExternalLink className="h-3 w-3" /></a>)}</div>}
+                  {item.evidence.length > 0 && <div className="mt-3 flex flex-wrap gap-2">{item.evidence.slice(0, 3).map((source) => <a key={source.url} href={source.url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 rounded-full border border-gray-200 px-2.5 py-1 text-[10px] font-semibold text-gray-600 hover:border-emerald-300 hover:text-emerald-700">{source.source}<ExternalLink className="h-3 w-3" /></a>)}</div>}
                   <button onClick={() => { setCommand(`Create a campaign for ${item.productName} using this Cambodia market opportunity: ${item.trendTitle}. Creative direction: ${item.recommendedCampaignAngle}.`); setActiveTab('main'); }} className="mt-4 rounded-lg bg-gray-900 px-3 py-2 text-xs font-semibold text-white">Use this opportunity</button>
                 </div>
               ))}
