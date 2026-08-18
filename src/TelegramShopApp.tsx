@@ -65,6 +65,7 @@ export default function TelegramShopApp() {
         setCategories(cSnap.docs.map((d) => d.data() as Category));
       })(),
     ]).then(([session]) => {
+      if (!session?.authenticated || !session?.user?.id) throw new Error('Telegram automatic sign-in failed.');
       setUser(session.user as TelegramMiniAppUser);
     }).catch((error) => {
       setFatalError(error instanceof Error ? error.message : 'Could not open Telegram shop.');
@@ -127,6 +128,6 @@ export default function TelegramShopApp() {
       <StoreFront products={products} categories={categories} cart={cart} onAddToCart={addToCart} onUpdateCartQuantity={updateQuantity} userId={user?.id ? `tg:${user.id}` : undefined} />
     </main>
     <TelegramCart isOpen={cartOpen} onClose={() => setCartOpen(false)} cart={cart} user={user} onUpdateQuantity={updateQuantity} onRemoveItem={(id) => saveCart(cart.filter((item) => item.product.id !== id))} onCheckoutSuccess={checkoutSuccess} onShowNotification={notify} />
-    <footer className="mt-12 border-t border-gray-100 bg-white px-4 py-7 text-center text-xs text-gray-400">Shopping Cambodia · Telegram Mini App · Telegram ID only</footer>
+    <footer className="mt-12 border-t border-gray-100 bg-white px-4 py-7 text-center text-xs text-gray-400">Shopping Cambodia · Telegram Mini App · Automatically signed in with verified Telegram ID</footer>
   </div>;
 }
