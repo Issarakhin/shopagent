@@ -46,10 +46,48 @@ export async function loadAgentStateFromFirestore(): Promise<AgentState | null> 
   }
 }
 
+// Firestore rejects any document field larger than 1,048,487 bytes. The agent
+// state grows unbounded (audit logs, executions, recipients, telemetry events),
+// so we persist a trimmed copy: cap the high-volume history arrays, then, as a
+// hard safety net, keep shrinking the largest arrays until the serialized JSON
+// comfortably fits. Newest entries are kept (arrays are stored newest-first).
+const FIRESTORE_MAX_JSON_BYTES = 1_000_000; // leave headroom under the 1 MiB limit
+
+function trimStateForFirestore(state: AgentState): AgentState {
+  const cap = <T>(arr: T[] | undefined, n: number): T[] => (Array.isArray(arr) ? arr.slice(0, n) : []);
+  return {
+    ...state,
+    auditLogs: cap(state.auditLogs, 300),
+    executions: cap(state.executions, 300),
+    workflows: cap(state.workflows, 150),
+    campaignRecipients: cap(state.campaignRecipients, 500),
+    events: cap(state.events, 300),
+    memories: cap(state.memories, 200),
+    cache: cap(state.cache, 200),
+    marketTrends: cap(state.marketTrends, 100),
+    dailyBoostRecommendations: cap(state.dailyBoostRecommendations, 100),
+    marketIntelligenceRuns: cap(state.marketIntelligenceRuns, 60),
+    campaigns: cap(state.campaigns, 300),
+  };
+}
+
 export async function saveAgentStateToFirestore(state: AgentState): Promise<void> {
   if (!db) return;
+  let trimmed = trimStateForFirestore(state);
+  let json = JSON.stringify(trimmed);
+  // Hard safety net: if still too large, keep halving the biggest history arrays.
+  const shrinkFields: Array<keyof AgentState> = ['auditLogs', 'executions', 'campaignRecipients', 'events', 'workflows', 'memories'];
+  let guard = 0;
+  while (Buffer.byteLength(json, 'utf8') > FIRESTORE_MAX_JSON_BYTES && guard < 20) {
+    for (const field of shrinkFields) {
+      const arr = trimmed[field] as unknown[];
+      if (Array.isArray(arr) && arr.length > 10) (trimmed[field] as unknown[]) = arr.slice(0, Math.floor(arr.length / 2));
+    }
+    json = JSON.stringify(trimmed);
+    guard += 1;
+  }
   await db.collection(STATE_COLLECTION).doc(STATE_DOC).set({
-    json: JSON.stringify(state),
+    json,
     version: state.version,
     updatedAt: new Date().toISOString(),
   });

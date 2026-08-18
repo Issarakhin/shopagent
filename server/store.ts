@@ -281,8 +281,12 @@ export class AgentStore {
 
   private persist(): void {
     // Cap unbounded history so the persisted state stays under Firestore's 1 MB limit.
-    if (this.state.workflows.length > 500) this.state.workflows = this.state.workflows.slice(0, 500);
-    if (this.state.executions.length > 1000) this.state.executions = this.state.executions.slice(0, 1000);
+    if (this.state.workflows.length > 300) this.state.workflows = this.state.workflows.slice(0, 300);
+    if (this.state.executions.length > 500) this.state.executions = this.state.executions.slice(0, 500);
+    if (this.state.auditLogs.length > 500) this.state.auditLogs = this.state.auditLogs.slice(0, 500);
+    if (this.state.campaignRecipients.length > 1000) this.state.campaignRecipients = this.state.campaignRecipients.slice(0, 1000);
+    if (this.state.events.length > 500) this.state.events = this.state.events.slice(0, 500);
+    if (this.state.memories.length > 300) this.state.memories = this.state.memories.slice(0, 300);
 
     const temp = `${AGENT_FILE}.tmp`;
     fs.writeFileSync(temp, JSON.stringify(this.state, null, 2));
