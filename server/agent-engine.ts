@@ -853,7 +853,13 @@ function findRecommendationId(dependencies: Record<string, unknown>): string | u
 
 function isSubscriberEligible(subscriber: import('./types.js').TelegramSubscriber, segmentIds: string[]): boolean {
   const segmentMatch = segmentIds.includes('all-consented') || segmentIds.some((segment) => subscriber.segmentIds.includes(segment));
-  const frequencyAllowed = !subscriber.lastMarketingMessageAt || Date.now() - new Date(subscriber.lastMarketingMessageAt).getTime() >= 24 * 60 * 60 * 1000;
+  // Minimum hours between marketing messages to the same person. Defaults to 24h
+  // so we never spam customers, but is configurable (set TELEGRAM_MIN_RESEND_HOURS=0
+  // to disable the cap, e.g. while testing).
+  const minResendHours = Number(process.env.TELEGRAM_MIN_RESEND_HOURS ?? 24);
+  const frequencyAllowed = minResendHours <= 0
+    || !subscriber.lastMarketingMessageAt
+    || Date.now() - new Date(subscriber.lastMarketingMessageAt).getTime() >= minResendHours * 60 * 60 * 1000;
   return subscriber.isActive && subscriber.isSubscribed && subscriber.marketingConsent && !subscriber.unsubscribedAt && segmentMatch && frequencyAllowed;
 }
 
@@ -965,8 +971,17 @@ async function publishTelegramCampaign(campaign: Campaign, approvalId: string): 
       if (sent > 0) target.publishedAt = now();
     }
   });
-  if (sent === 0) return fail('marketing', 'publish_approved_campaign', 'TELEGRAM_PUBLISH_FAILED', failed ? 'Telegram publishing failed for every eligible recipient.' : 'No eligible Telegram recipients were available.');
-  return success('marketing', 'publish_approved_campaign', `Telegram campaign sent to ${sent} recipients.`, { campaignId: campaign.id, sent, failed, skipped, duplicatePrevented, status: finalStatus }, failed ? ['Some recipient sends failed.'] : []);
+  if (sent === 0) {
+    const reason = failed
+      ? 'Telegram publishing failed for every eligible recipient.'
+      : skipped
+        ? `No recipients were eligible right now (${skipped} skipped — usually the marketing frequency cap or missing consent). Set TELEGRAM_MIN_RESEND_HOURS=0 to allow immediate re-sends while testing.`
+        : duplicatePrevented
+          ? 'Every recipient already received this campaign (duplicate prevention).'
+          : 'No Telegram subscribers were available. Confirm subscribers exist and have marketing consent.';
+    return fail('marketing', 'publish_approved_campaign', 'TELEGRAM_PUBLISH_FAILED', reason);
+  }
+  return success('marketing', 'publish_approved_campaign', `Telegram campaign sent to ${sent} recipients (${skipped} skipped, ${failed} failed, ${duplicatePrevented} duplicate-prevented).`, { campaignId: campaign.id, sent, failed, skipped, duplicatePrevented, status: finalStatus }, failed ? ['Some recipient sends failed.'] : []);
 }
 
 export async function createWorkflowFromCommand(command: string, actor: string): Promise<{ workflow: Workflow | null; plan: MainAgentPlan; source: string }> {
