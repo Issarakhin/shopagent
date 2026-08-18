@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { firestoreEnabled, loadAgentStateFromFirestore, saveAgentStateToFirestore } from './firestore.js';
+import { fetchTelegramSubscribers, firestoreEnabled, loadAgentStateFromFirestore, saveAgentStateToFirestore } from './firestore.js';
 import { DEFAULT_SKILLS } from './default-skills.js';
 import {
   AgentState,
@@ -265,6 +265,32 @@ export class AgentStore {
       void saveAgentStateToFirestore(this.state).catch((error) =>
         console.error('Failed to seed agent state in Firestore:', error));
     }
+  }
+
+  // Pull the live `telegramChats` collection (everyone who messaged the bot) and
+  // upsert them into the subscriber list by chatId, so campaigns always reach the
+  // real, current audience — not just whoever was added manually. Existing
+  // marketing timestamps/consent are preserved on refresh.
+  async refreshTelegramSubscribers(): Promise<void> {
+    if (!firestoreEnabled) return;
+    const live = await fetchTelegramSubscribers();
+    if (!live.length) return;
+    this.mutate((draft) => {
+      for (const incoming of live) {
+        const existing = draft.telegramSubscribers.find((item) => item.chatId === incoming.chatId);
+        if (existing) {
+          // Keep locally-tracked send history and consent decisions.
+          Object.assign(existing, {
+            displayName: incoming.displayName,
+            language: incoming.language,
+            isActive: incoming.isActive,
+            isSubscribed: incoming.isSubscribed,
+          });
+        } else {
+          draft.telegramSubscribers.push(incoming);
+        }
+      }
+    });
   }
 
   private firestoreSaveTimer: NodeJS.Timeout | null = null;

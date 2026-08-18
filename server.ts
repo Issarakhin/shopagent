@@ -544,8 +544,9 @@ async function startServer() {
   // Load Firestore data AFTER the port is bound so a slow/failing Firestore
   // connection can never delay boot (which on Heroku crashes the dyno and strips
   // CORS headers). Runs in the background.
-  void agentStore.hydrateFromFirestore().catch((error) =>
-    console.error('Firestore hydration failed:', error));
+  void agentStore.hydrateFromFirestore()
+    .then(() => agentStore.refreshTelegramSubscribers())
+    .catch((error) => console.error('Firestore hydration failed:', error));
   void refreshBusinessDataFromFirestore().catch((error) =>
     console.error('Business data refresh failed:', error));
   setInterval(() => {

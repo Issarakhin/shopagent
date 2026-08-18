@@ -906,6 +906,9 @@ async function sendTelegram(chatId: string, text: string): Promise<{ messageId: 
 
 async function publishTelegramCampaign(campaign: Campaign, approvalId: string): Promise<SkillResult> {
   if (!['approved', 'awaiting_review'].includes(campaign.status)) return fail('marketing', 'publish_approved_campaign', 'INVALID_CAMPAIGN_STATE', `Campaign cannot publish from ${campaign.status}.`);
+  // Pull the current telegramChats audience right before sending so a newly
+  // started subscriber is always included, not just whoever is cached in state.
+  await agentStore.refreshTelegramSubscribers().catch(() => undefined);
   const state = agentStore.getState();
   const subscribers = state.telegramSubscribers;
   const eligible = subscribers.filter((subscriber) => isSubscriberEligible(subscriber, campaign.segmentIds));
