@@ -43,6 +43,7 @@ export const agentApi = {
   inventoryForecast: () => request('/admin/phase2/inventory-forecast', { method: 'POST' }),
   revenueOpportunities: () => request('/admin/phase2/revenue-opportunities', { method: 'POST' }),
   addSubscriber: (subscriber: Record<string, unknown>) => request('/admin/telegram-subscribers', { method: 'POST', body: JSON.stringify(subscriber) }),
+  scanMarketIntelligence: (requestText?: string) => request('/admin/market-intelligence/scan', { method: 'POST', body: JSON.stringify({ request: requestText, force: true }) }),
 };
 
 export async function trackStoreEvent(event: Record<string, unknown>) {
