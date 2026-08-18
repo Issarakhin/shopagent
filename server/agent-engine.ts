@@ -852,7 +852,14 @@ function findRecommendationId(dependencies: Record<string, unknown>): string | u
 }
 
 function isSubscriberEligible(subscriber: import('./types.js').TelegramSubscriber, segmentIds: string[]): boolean {
-  const segmentMatch = segmentIds.includes('all-consented') || segmentIds.some((segment) => subscriber.segmentIds.includes(segment));
+  // A subscriber in the broad "all-consented" pool is part of the general
+  // marketing audience and is reachable by any campaign, even when the campaign
+  // targets a specific named segment. Otherwise a campaign matches only when it
+  // explicitly targets all-consented or shares a named segment with the subscriber.
+  const segmentMatch =
+    subscriber.segmentIds.includes('all-consented')
+    || segmentIds.includes('all-consented')
+    || segmentIds.some((segment) => subscriber.segmentIds.includes(segment));
   // Minimum hours between marketing messages to the same person. Defaults to 24h
   // so we never spam customers, but is configurable (set TELEGRAM_MIN_RESEND_HOURS=0
   // to disable the cap, e.g. while testing).
