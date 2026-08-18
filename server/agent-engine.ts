@@ -922,6 +922,8 @@ async function publishTelegramCampaign(campaign: Campaign, approvalId: string): 
   let failed = 0;
   let skipped = 0;
   let duplicatePrevented = 0;
+  const sentChatIds: string[] = [];
+  const skippedChatIds: string[] = [];
   for (const subscriber of subscribers) {
     const idempotencyKey = `campaign:${campaign.id}:telegram:${subscriber.chatId}`;
     const existing = agentStore.getState().campaignRecipients.find((item) => item.idempotencyKey === idempotencyKey && item.status === 'sent');
@@ -936,6 +938,7 @@ async function publishTelegramCampaign(campaign: Campaign, approvalId: string): 
     }
     if (!eligible.some((item) => item.id === subscriber.id)) {
       skipped += 1;
+      skippedChatIds.push(subscriber.chatId);
       agentStore.mutate((draft) => {
         draft.campaignRecipients.push({ id: id('recipient'), campaignId: campaign.id, telegramChatId: subscriber.chatId, status: subscriber.unsubscribedAt ? 'unsubscribed' : 'skipped', retryCount: 0, idempotencyKey });
       });
@@ -950,6 +953,7 @@ async function publishTelegramCampaign(campaign: Campaign, approvalId: string): 
       const message = subscriber.language === 'km' ? campaign.telegramMessageKh : subscriber.language === 'en' ? campaign.telegramMessageEn : `${campaign.telegramMessageKh}\n\n${campaign.telegramMessageEn}`;
       const result = await sendTelegram(subscriber.chatId, message);
       sent += 1;
+      sentChatIds.push(subscriber.chatId);
       agentStore.mutate((draft) => {
         const recipient = draft.campaignRecipients.find((item) => item.id === recipientId);
         if (recipient) Object.assign(recipient, { status: 'sent', telegramMessageId: result.messageId, sentAt: now() });
@@ -986,9 +990,15 @@ async function publishTelegramCampaign(campaign: Campaign, approvalId: string): 
         : duplicatePrevented
           ? 'Every recipient already received this campaign (duplicate prevention).'
           : 'No Telegram subscribers were available. Confirm subscribers exist and have marketing consent.';
-    return fail('marketing', 'publish_approved_campaign', 'TELEGRAM_PUBLISH_FAILED', reason);
+    const skipDetail = skippedChatIds.length ? [`Skipped chat IDs: ${skippedChatIds.join(', ')}.`] : [];
+    return fail('marketing', 'publish_approved_campaign', 'TELEGRAM_PUBLISH_FAILED', `${reason}${skipDetail.length ? ' ' + skipDetail[0] : ''}`);
   }
-  return success('marketing', 'publish_approved_campaign', `Telegram campaign sent to ${sent} recipients (${skipped} skipped, ${failed} failed, ${duplicatePrevented} duplicate-prevented).`, { campaignId: campaign.id, sent, failed, skipped, duplicatePrevented, status: finalStatus }, failed ? ['Some recipient sends failed.'] : []);
+  const warnings = [
+    `Sent to chat IDs: ${sentChatIds.join(', ')}.`,
+    ...(skippedChatIds.length ? [`Skipped chat IDs: ${skippedChatIds.join(', ')} (frequency cap, consent, or segment).`] : []),
+    ...(failed ? ['Some recipient sends failed.'] : []),
+  ];
+  return success('marketing', 'publish_approved_campaign', `Telegram campaign sent to ${sent} recipients (${skipped} skipped, ${failed} failed, ${duplicatePrevented} duplicate-prevented).`, { campaignId: campaign.id, sent, failed, skipped, duplicatePrevented, status: finalStatus, sentChatIds, skippedChatIds }, warnings);
 }
 
 export async function createWorkflowFromCommand(command: string, actor: string): Promise<{ workflow: Workflow | null; plan: MainAgentPlan; source: string }> {
