@@ -1267,9 +1267,14 @@ export async function decideApproval(approvalId: string, status: 'approved' | 'r
   }
   const currentWorkflow = agentStore.getState().workflows.find((item) => item.id === approval.workflowId);
   const currentStep = currentWorkflow?.steps.find((item) => item.id === approval.stepId);
-  if (!currentStep) throw new Error('Approval workflow step was not found.');
-  if (approval.payloadHash !== stableHash(currentStep.input)) {
-    throw Object.assign(new Error('The action input changed after approval was requested. Request a new approval.'), { code: 'APPROVAL_PAYLOAD_MISMATCH' });
+  // Rejecting or requesting changes never executes the action, so a missing step
+  // or changed input must not block the reviewer from clearing a stale approval.
+  // These integrity guards only matter when we are about to APPROVE and run it.
+  if (status === 'approved') {
+    if (!currentStep) throw new Error('Approval workflow step was not found.');
+    if (approval.payloadHash !== stableHash(currentStep.input)) {
+      throw Object.assign(new Error('The action input changed after approval was requested. Request a new approval.'), { code: 'APPROVAL_PAYLOAD_MISMATCH' });
+    }
   }
   if (status === 'approved' && approval.resourceVersion !== undefined && approval.resourceId) {
     const campaign = agentStore.getState().campaigns.find((item) => item.id === approval.resourceId);

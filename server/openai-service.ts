@@ -943,15 +943,43 @@ const CAMPAIGN_SCHEMA = {
 function parseCampaignOutput(value: unknown): Omit<CampaignDraftOutput, 'similarityScore' | 'contentFingerprint' | 'source'> {
   if (!value || typeof value !== 'object') throw new Error('Campaign output must be an object.');
   const record = value as Record<string, unknown>;
-  const requiredStrings = [
-    'campaignName', 'objective', 'userIntent', 'campaignPurpose', 'targetAudience', 'tone', 'contentStyle',
-    'contentShape', 'desiredReaction', 'creativeAngle', 'creativeRationale', 'kh', 'en', 'callToAction',
-  ] as const;
-  for (const key of requiredStrings) if (typeof record[key] !== 'string' || !String(record[key]).trim()) throw new Error(`Campaign output is missing ${key}.`);
-  if (!Array.isArray(record.productFactsUsed) || !record.productFactsUsed.every((item) => typeof item === 'string')) throw new Error('Campaign product facts are invalid.');
-  if (!Array.isArray(record.userLogicMatch) || record.userLogicMatch.length < 2 || !record.userLogicMatch.every((item) => typeof item === 'string')) throw new Error('Campaign user-logic notes are invalid.');
-  if (!Array.isArray(record.variationNotes) || record.variationNotes.length < 4 || !record.variationNotes.every((item) => typeof item === 'string')) throw new Error('Campaign variation notes are invalid.');
-  return record as unknown as Omit<CampaignDraftOutput, 'similarityScore' | 'contentFingerprint' | 'source'>;
+  const str = (key: string, fallback = '') => {
+    const raw = record[key];
+    return typeof raw === 'string' && raw.trim() ? raw.trim() : fallback;
+  };
+  const strArray = (key: string) => {
+    const raw = record[key];
+    return Array.isArray(raw) ? raw.filter((item): item is string => typeof item === 'string' && item.trim().length > 0) : [];
+  };
+
+  // The only fields we truly need are the actual sales messages the customer
+  // will read. Everything else is descriptive metadata — default it instead of
+  // failing the whole draft, so a good salesman-style message is never thrown
+  // away just because the model skipped a bookkeeping field.
+  const en = str('en') || str('kh');
+  const kh = str('kh') || str('en');
+  if (!en && !kh) throw new Error('Campaign output has no message text.');
+
+  const campaignName = str('campaignName', 'Untitled campaign');
+  return {
+    campaignName,
+    objective: str('objective', 'Promote the selected products.'),
+    userIntent: str('userIntent', str('objective', 'Promote the selected products.')),
+    campaignPurpose: str('campaignPurpose', 'product promotion'),
+    targetAudience: str('targetAudience', 'interested customers'),
+    tone: str('tone', 'friendly and persuasive'),
+    contentStyle: str('contentStyle', 'free-form sales message'),
+    contentShape: str('contentShape', 'one cohesive promotional message'),
+    desiredReaction: str('desiredReaction', 'interest and purchase'),
+    creativeAngle: str('creativeAngle', campaignName),
+    creativeRationale: str('creativeRationale', 'Direct, benefit-led promotion of the product.'),
+    kh,
+    en,
+    callToAction: str('callToAction', 'Message us to order today.'),
+    productFactsUsed: strArray('productFactsUsed'),
+    userLogicMatch: strArray('userLogicMatch'),
+    variationNotes: strArray('variationNotes'),
+  } as Omit<CampaignDraftOutput, 'similarityScore' | 'contentFingerprint' | 'source'>;
 }
 
 function campaignConstraintViolations(
