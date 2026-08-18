@@ -101,6 +101,26 @@ function formatTime(value?: string) {
   return new Date(value).toLocaleString();
 }
 
+// Guarantee every array/object field the UI reads actually exists, so a partial
+// or unexpected API response can never white-screen the admin panel.
+function normalizeAgentState(raw: any): AgentState {
+  const state = (raw && typeof raw === 'object') ? raw : {};
+  const arrayFields = [
+    'skills', 'workflows', 'approvals', 'campaigns', 'executions', 'auditLogs', 'memories',
+    'boosts', 'cache', 'telegramSubscribers', 'pricingRecommendations', 'customerSegments',
+    'inventoryForecasts', 'revenueOpportunities', 'events', 'dailyBoostRecommendations',
+    'marketTrends', 'marketIntelligenceRuns',
+  ];
+  for (const field of arrayFields) {
+    if (!Array.isArray(state[field])) state[field] = [];
+  }
+  state.controls = state.controls && typeof state.controls === 'object' ? state.controls : {};
+  state.heartbeat = state.heartbeat && typeof state.heartbeat === 'object'
+    ? { ...state.heartbeat, checks: state.heartbeat.checks ?? {} }
+    : { enabled: false, intervalMinutes: 0, checks: {} };
+  return state as AgentState;
+}
+
 export default function AgentAdminCenter({ products, onShowNotification }: Props) {
   const [state, setState] = useState<AgentState | null>(null);
   const [activeTab, setActiveTab] = useState<Tab>('main');
@@ -115,7 +135,7 @@ export default function AgentAdminCenter({ products, onShowNotification }: Props
   const refresh = async () => {
     setLoading(true);
     try {
-      setState(await agentApi.state());
+      setState(normalizeAgentState(await agentApi.state()));
     } catch (error) {
       onShowNotification(error instanceof Error ? error.message : 'Could not load agent system.', 'error');
     } finally {
