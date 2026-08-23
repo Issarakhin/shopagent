@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { 
-  X, Mail, Lock, User, Phone, MapPin, Shield, Sparkles, LogOut, CheckCircle, Edit
+  X, Mail, Lock, User, Phone, MapPin, Shield, Sparkles, LogOut, CheckCircle, Edit, Send
 } from 'lucide-react';
 import { 
   signInWithEmailAndPassword, 
@@ -10,6 +10,7 @@ import {
 } from 'firebase/auth';
 import { doc, setDoc, getDoc, updateDoc } from 'firebase/firestore';
 import { auth, db } from '../firebase';
+import { telegramApi } from '../telegram-api';
 
 interface AuthModalProps {
   isOpen: boolean;
@@ -29,6 +30,7 @@ export default function AuthModal({
   const [isLogin, setIsLogin] = useState(true);
   const [isEditingProfile, setIsEditingProfile] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [telegramLinkLoading, setTelegramLinkLoading] = useState(false);
 
   // Auth Form State
   const [email, setEmail] = useState('');
@@ -136,6 +138,28 @@ export default function AuthModal({
       onShowNotification('Failed to update profile.', 'error');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleConnectTelegram = async () => {
+    const user = auth.currentUser;
+    if (!user) {
+      onShowNotification('Please sign in first.', 'warning');
+      return;
+    }
+
+    setTelegramLinkLoading(true);
+    try {
+      const idToken = await user.getIdToken(true);
+      const link = await telegramApi.createAccountLink(idToken);
+      const popup = window.open(link.telegramUrl, '_blank', 'noopener,noreferrer');
+      if (!popup) window.location.href = link.telegramUrl;
+      onShowNotification('Telegram opened. Tap Start/Open App there once to link this account.', 'success');
+    } catch (error) {
+      console.error('Telegram account link error:', error);
+      onShowNotification(error instanceof Error ? error.message : 'Could not start Telegram linking.', 'error');
+    } finally {
+      setTelegramLinkLoading(false);
     }
   };
 
@@ -296,6 +320,34 @@ export default function AuthModal({
                           {userProfile.address || <em className="text-gray-400">No delivery address configured</em>}
                         </span>
                       </div>
+                    </div>
+
+                    <div className="rounded-xl border border-sky-100 bg-sky-50/70 p-4">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2">
+                            <Send className="h-4 w-4 text-sky-600" />
+                            <p className="text-sm font-bold text-gray-900">Telegram Mini App</p>
+                          </div>
+                          <p className="mt-1 text-xs leading-relaxed text-gray-500">
+                            {userProfile.telegramLinked
+                              ? `Linked${userProfile.telegramUserId ? ` to Telegram ID ${userProfile.telegramUserId}` : ''}. The Mini App will sign in to this same account automatically.`
+                              : 'Link Telegram once. After that, opening the Mini App signs in to this same web account automatically.'}
+                          </p>
+                        </div>
+                        {userProfile.telegramLinked && (
+                          <span className="shrink-0 rounded-full bg-emerald-100 px-2 py-1 text-[10px] font-bold uppercase tracking-wide text-emerald-700">Linked</span>
+                        )}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={handleConnectTelegram}
+                        disabled={telegramLinkLoading}
+                        className="mt-3 flex w-full items-center justify-center gap-2 rounded-lg bg-sky-600 px-4 py-2.5 text-sm font-semibold text-white transition-all hover:bg-sky-500 disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        <Send className="h-4 w-4" />
+                        <span>{telegramLinkLoading ? 'Preparing Telegram…' : userProfile.telegramLinked ? 'Reconnect Telegram' : 'Connect Telegram'}</span>
+                      </button>
                     </div>
 
                     <div className="flex space-x-3 pt-4 border-t border-gray-100">
