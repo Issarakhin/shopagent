@@ -15,6 +15,7 @@ export interface TelegramWebUser {
 interface TelegramRequest extends Request {
   telegramUser?: TelegramWebUser;
   telegramInitData?: string;
+  telegramStartParam?: string;
 }
 
 interface TelegramChatProfile {
@@ -40,7 +41,7 @@ function parseTelegramUser(value: string | null): TelegramWebUser {
   };
 }
 
-export function validateTelegramInitData(initData: string): TelegramWebUser {
+export function validateTelegramInitDataPayload(initData: string): { user: TelegramWebUser; startParam?: string } {
   const botToken = process.env.TELEGRAM_BOT_TOKEN;
   if (!botToken) {
     throw Object.assign(new Error('TELEGRAM_BOT_TOKEN is not configured.'), { code: 'TELEGRAM_BOT_TOKEN_REQUIRED' });
@@ -76,14 +77,23 @@ export function validateTelegramInitData(initData: string): TelegramWebUser {
     throw Object.assign(new Error('Telegram session is too old. Reopen the Mini App from Telegram.'), { code: 'TELEGRAM_INIT_DATA_EXPIRED' });
   }
 
-  return parseTelegramUser(params.get('user'));
+  return {
+    user: parseTelegramUser(params.get('user')),
+    startParam: params.get('start_param') || undefined,
+  };
+}
+
+export function validateTelegramInitData(initData: string): TelegramWebUser {
+  return validateTelegramInitDataPayload(initData).user;
 }
 
 function telegramAuth(req: TelegramRequest, res: Response, next: NextFunction) {
   try {
     const initData = String(req.header('x-telegram-init-data') ?? req.body?.initData ?? '');
     req.telegramInitData = initData;
-    req.telegramUser = validateTelegramInitData(initData);
+    const payload = validateTelegramInitDataPayload(initData);
+    req.telegramUser = payload.user;
+    req.telegramStartParam = payload.startParam;
     next();
   } catch (error: any) {
     const code = error?.code ?? 'TELEGRAM_AUTH_FAILED';
@@ -121,6 +131,123 @@ async function findTelegramChatProfile(user: TelegramWebUser): Promise<TelegramC
   }
 
   return { ref: chats.doc(user.id), data: {}, chatId: user.id };
+}
+
+
+function accountLinkDocId(token: string) {
+  return crypto.createHash('sha256').update(token).digest('hex');
+}
+
+async function createAccountLink(firebaseUid: string) {
+  const db = getAdminFirestore();
+  if (!db) throw Object.assign(new Error('Firestore Admin is not configured on the backend.'), { code: 'FIRESTORE_ADMIN_REQUIRED' });
+
+  const token = crypto.randomBytes(24).toString('base64url');
+  const docId = accountLinkDocId(token);
+  const now = Date.now();
+  const ttlSeconds = Math.max(120, Number(process.env.TELEGRAM_ACCOUNT_LINK_TTL_SECONDS ?? 900));
+  const expiresAtMs = now + ttlSeconds * 1000;
+
+  await db.collection('telegramAccountLinks').doc(docId).set({
+    firebaseUid,
+    status: 'pending',
+    createdAt: new Date(now).toISOString(),
+    expiresAt: new Date(expiresAtMs).toISOString(),
+  });
+
+  const botUsername = String(process.env.TELEGRAM_BOT_USERNAME ?? 'Shopcamagent_bot').replace(/^@/, '').trim();
+  if (!botUsername) throw Object.assign(new Error('TELEGRAM_BOT_USERNAME is not configured.'), { code: 'TELEGRAM_BOT_USERNAME_REQUIRED' });
+  const shortName = String(process.env.TELEGRAM_MINI_APP_SHORT_NAME ?? '').trim();
+  const startParam = `link_${token}`;
+  const telegramUrl = shortName
+    ? `https://t.me/${encodeURIComponent(botUsername)}/${encodeURIComponent(shortName)}?startapp=${encodeURIComponent(startParam)}`
+    : `https://t.me/${encodeURIComponent(botUsername)}?startapp=${encodeURIComponent(startParam)}`;
+
+  return { telegramUrl, startParam, expiresAt: new Date(expiresAtMs).toISOString() };
+}
+
+async function consumeAccountLinkIfPresent(user: TelegramWebUser, match: TelegramChatProfile, startParam?: string) {
+  if (!startParam?.startsWith('link_')) return false;
+
+  const db = getAdminFirestore();
+  const auth = getAdminAuth();
+  if (!db || !auth) throw Object.assign(new Error('Firebase Admin is not configured on the backend.'), { code: 'FIREBASE_ADMIN_REQUIRED' });
+
+  const token = startParam.slice('link_'.length);
+  if (!/^[A-Za-z0-9_-]{20,}$/.test(token)) {
+    throw Object.assign(new Error('Telegram account-link token is invalid.'), { code: 'ACCOUNT_LINK_INVALID' });
+  }
+
+  const linkRef = db.collection('telegramAccountLinks').doc(accountLinkDocId(token));
+  const linkSnap = await linkRef.get();
+  if (!linkSnap.exists) throw Object.assign(new Error('This Telegram account-link link is invalid or has already been used.'), { code: 'ACCOUNT_LINK_INVALID' });
+
+  const link = linkSnap.data() as Record<string, any>;
+  const firebaseUid = String(link.firebaseUid ?? '');
+  if (!firebaseUid) throw Object.assign(new Error('Telegram account-link record is incomplete.'), { code: 'ACCOUNT_LINK_INVALID' });
+  if (link.status !== 'pending') throw Object.assign(new Error('This Telegram account-link link has already been used.'), { code: 'ACCOUNT_LINK_USED' });
+  const expiresAtMs = Date.parse(String(link.expiresAt ?? ''));
+  if (!Number.isFinite(expiresAtMs) || expiresAtMs < Date.now()) {
+    throw Object.assign(new Error('This Telegram account-link link has expired. Create a new link from your web account.'), { code: 'ACCOUNT_LINK_EXPIRED' });
+  }
+
+  await auth.getUser(firebaseUid);
+  const userRef = db.collection('users').doc(firebaseUid);
+  const webUserSnap = await userRef.get();
+  if (!webUserSnap.exists) throw Object.assign(new Error('The web account for this Telegram link no longer exists.'), { code: 'ACCOUNT_LINK_ACCOUNT_MISSING' });
+  const webUser = webUserSnap.data() ?? {};
+
+  const existingWebTelegramId = webUser.telegramUserId ? String(webUser.telegramUserId) : '';
+  if (existingWebTelegramId && existingWebTelegramId !== user.id) {
+    throw Object.assign(new Error('This web account is already linked to a different Telegram account.'), { code: 'ACCOUNT_ALREADY_LINKED' });
+  }
+
+  const existingTelegramUid = String(match.data.firebaseUid ?? match.data.linkedFirebaseUid ?? match.data.accountUid ?? '');
+  if (existingTelegramUid && existingTelegramUid !== firebaseUid) {
+    throw Object.assign(new Error('This Telegram account is already linked to a different Shopping Cambodia account.'), { code: 'TELEGRAM_ALREADY_LINKED' });
+  }
+
+  const now = new Date().toISOString();
+  await db.runTransaction(async (tx) => {
+    const freshLink = await tx.get(linkRef);
+    if (!freshLink.exists || freshLink.data()?.status !== 'pending') {
+      throw Object.assign(new Error('This Telegram account-link link has already been used.'), { code: 'ACCOUNT_LINK_USED' });
+    }
+    const freshExpires = Date.parse(String(freshLink.data()?.expiresAt ?? ''));
+    if (!Number.isFinite(freshExpires) || freshExpires < Date.now()) {
+      throw Object.assign(new Error('This Telegram account-link link has expired.'), { code: 'ACCOUNT_LINK_EXPIRED' });
+    }
+
+    tx.set(userRef, {
+      telegramUserId: user.id,
+      telegramChatId: match.chatId,
+      telegramUsername: user.username ?? '',
+      telegramLinked: true,
+      updatedAt: now,
+    }, { merge: true });
+
+    tx.set(match.ref, {
+      chatId: match.chatId,
+      telegramUserId: user.id,
+      firebaseUid,
+      linkedFirebaseUid: firebaseUid,
+      linkedAccount: true,
+      telegramUsername: user.username ?? '',
+      lastSeenAt: now,
+      lastMiniAppSeenAt: now,
+    }, { merge: true });
+
+    tx.set(linkRef, {
+      status: 'consumed',
+      consumedAt: now,
+      telegramUserId: user.id,
+      telegramChatId: match.chatId,
+    }, { merge: true });
+  });
+
+  // Keep the in-memory match consistent for the current request.
+  match.data = { ...match.data, firebaseUid, linkedFirebaseUid: firebaseUid, linkedAccount: true };
+  return true;
 }
 
 async function resolveExistingFirebaseUid(user: TelegramWebUser, match: TelegramChatProfile): Promise<string> {
@@ -227,8 +354,9 @@ async function ensureExistingFirebaseIdentity(user: TelegramWebUser, match: Tele
   };
 }
 
-async function upsertTelegramUser(user: TelegramWebUser) {
+async function upsertTelegramUser(user: TelegramWebUser, startParam?: string) {
   const match = await findTelegramChatProfile(user);
+  await consumeAccountLinkIfPresent(user, match, startParam);
   const previous = match.data;
   const now = new Date().toISOString();
   const identity = await ensureExistingFirebaseIdentity(user, match);
@@ -263,10 +391,27 @@ async function upsertTelegramUser(user: TelegramWebUser) {
 
 export const telegramWebAppRouter = Router();
 
+telegramWebAppRouter.post('/link/start', async (req, res) => {
+  try {
+    const auth = getAdminAuth();
+    if (!auth) throw Object.assign(new Error('Firebase Admin is not configured on the backend.'), { code: 'FIREBASE_ADMIN_REQUIRED' });
+    const authorization = String(req.header('authorization') ?? '');
+    const match = authorization.match(/^Bearer\s+(.+)$/i);
+    if (!match) return res.status(401).json({ error: 'Firebase ID token is required.', code: 'FIREBASE_ID_TOKEN_REQUIRED' });
+    const decoded = await auth.verifyIdToken(match[1], true);
+    const link = await createAccountLink(decoded.uid);
+    res.status(201).json({ ok: true, ...link });
+  } catch (error: any) {
+    const code = error?.code ?? 'ACCOUNT_LINK_START_FAILED';
+    const status = ['FIRESTORE_ADMIN_REQUIRED', 'FIREBASE_ADMIN_REQUIRED', 'TELEGRAM_BOT_USERNAME_REQUIRED'].includes(code) ? 503 : 401;
+    res.status(status).json({ error: error instanceof Error ? error.message : String(error), code });
+  }
+});
+
 telegramWebAppRouter.post('/session', telegramAuth, async (req: TelegramRequest, res) => {
   try {
     const user = req.telegramUser!;
-    const profile = await upsertTelegramUser(user);
+    const profile = await upsertTelegramUser(user, req.telegramStartParam);
     res.json({
       ok: true,
       authenticated: true,
