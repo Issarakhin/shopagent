@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import Header from './components/Header';
 import StoreFront from './components/StoreFront';
 import AdminDashboard from './components/AdminDashboard';
+import ErrorBoundary from './components/ErrorBoundary';
 import Cart from './components/Cart';
 import AuthModal from './components/AuthModal';
 import { Product, Category, Order, CartItem, SalesStats } from './types';
@@ -10,8 +11,9 @@ import { auth, db, seedDatabaseIfEmpty } from './firebase';
 import { onAuthStateChanged } from 'firebase/auth';
 import { collection, getDocs, doc, getDoc, setDoc, writeBatch } from 'firebase/firestore';
 import { trackStoreEvent } from './agent-api';
+import TelegramShopApp from './TelegramShopApp';
 
-export default function App() {
+function NormalWebApp() {
   const [activeView, setActiveView] = useState<'store' | 'admin'>('store');
   const [products, setProducts] = useState<Product[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
@@ -186,10 +188,10 @@ export default function App() {
       // Direct Firestore seeding helper
       await seedDatabaseIfEmpty();
 
-      const [pSnap, cSnap, oSnap] = await Promise.all([
+      // Products and categories are public-read, so the storefront can always load them.
+      const [pSnap, cSnap] = await Promise.all([
         getDocs(collection(db, 'products')),
-        getDocs(collection(db, 'categories')),
-        getDocs(collection(db, 'orders'))
+        getDocs(collection(db, 'categories'))
       ]);
 
       const pList: Product[] = [];
@@ -202,10 +204,17 @@ export default function App() {
         cList.push(d.data() as Category);
       });
 
+      // Orders are admin/owner-only under firestore.rules. Guests and buyers get a
+      // permission-denied here, which is expected — don't let it break the storefront.
       const oList: Order[] = [];
-      oSnap.forEach(d => {
-        oList.push(d.data() as Order);
-      });
+      try {
+        const oSnap = await getDocs(collection(db, 'orders'));
+        oSnap.forEach(d => {
+          oList.push(d.data() as Order);
+        });
+      } catch (orderErr) {
+        console.info('Orders are not readable for the current user (expected for non-admins).', orderErr);
+      }
 
       // Sort lists
       setProducts(pList);
@@ -224,6 +233,14 @@ export default function App() {
   useEffect(() => {
     refreshAllData();
   }, []);
+
+  // Re-sync once the signed-in role is known so admins pick up orders (which are
+  // not readable before authentication under firestore.rules).
+  useEffect(() => {
+    if (userProfile?.role === 'admin') {
+      refreshAllData();
+    }
+  }, [userProfile?.role]);
 
   // Display top floating alerts
   const showNotification = (message: string, type: 'success' | 'error' | 'warning') => {
@@ -371,14 +388,16 @@ export default function App() {
             onUpdateCartQuantity={handleUpdateCartQuantity}
           />
         ) : userProfile?.role === 'admin' ? (
-          <AdminDashboard
-            products={products}
-            categories={categories}
-            orders={orders}
-            stats={stats}
-            onRefreshData={refreshAllData}
-            onShowNotification={showNotification}
-          />
+          <ErrorBoundary fallbackTitle="The admin dashboard hit an error">
+            <AdminDashboard
+              products={products}
+              categories={categories}
+              orders={orders}
+              stats={stats}
+              onRefreshData={refreshAllData}
+              onShowNotification={showNotification}
+            />
+          </ErrorBoundary>
         ) : (
           /* Admin Access Restricted Screen */
           <div className="py-20 flex flex-col items-center justify-center text-center">
@@ -462,4 +481,15 @@ export default function App() {
       </footer>
     </div>
   );
+}
+
+
+// Defense-in-depth route guard: even if main.tsx or a stale bootstrap renders
+// <App /> for /telegram, never expose the normal website/auth/admin UI there.
+export default function App() {
+  if (window.location.pathname === '/telegram' || window.location.pathname.startsWith('/telegram/')) {
+    return <TelegramShopApp />;
+  }
+
+  return <NormalWebApp />;
 }
