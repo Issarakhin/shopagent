@@ -21,7 +21,22 @@ async function telegramRequest<T>(path: string, options: RequestInit = {}): Prom
   return payload as T;
 }
 
+async function createAccountLink(firebaseIdToken: string) {
+  const response = await fetch(apiUrl('/api/telegram/link/start'), {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${firebaseIdToken}`,
+    },
+    body: JSON.stringify({}),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload.error ?? `Could not start Telegram account linking (${response.status}).`);
+  return payload as { ok: true; telegramUrl: string; startParam: string; expiresAt: string };
+}
+
 export const telegramApi = {
+  createAccountLink,
   session: () => telegramRequest<any>('/session', { method: 'POST', body: JSON.stringify({}) }),
   createOrder: (payload: {
     customerName: string;
