@@ -6,7 +6,7 @@ import type { CartItem, Category, Order, Product } from './types';
 import StoreFront from './components/StoreFront';
 import TelegramHeader from './components/TelegramHeader';
 import TelegramCart from './components/TelegramCart';
-import { initializeTelegramWebApp, type TelegramMiniAppUser } from './telegram-webapp';
+import { initializeTelegramWebApp, waitForTelegramWebApp, type TelegramMiniAppUser } from './telegram-webapp';
 import { telegramApi } from './telegram-api';
 import { trackStoreEvent } from './agent-api';
 import { ShieldCheck } from 'lucide-react';
@@ -50,14 +50,16 @@ export default function TelegramShopApp() {
   }, []);
 
   useEffect(() => {
-    const tg = initializeTelegramWebApp();
-    if (!tg?.initData) {
-      setFatalError('Open this shop from the Shopping Cambodia Telegram bot. Telegram identity data was not provided.');
-      setLoading(false);
-      return;
-    }
-
     void (async () => {
+      await waitForTelegramWebApp(2500);
+      const tg = initializeTelegramWebApp();
+      if (!tg?.initData) {
+      setFatalError('Open this shop from the Shopping Cambodia Telegram bot. Telegram identity data was not provided.');
+        setLoading(false);
+        return;
+      }
+
+
       try {
         const [session] = await Promise.all([
           telegramApi.session(),
