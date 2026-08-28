@@ -28,6 +28,8 @@ export default function TelegramShopApp() {
     window.setTimeout(() => setNotification(null), 3500);
   }
 
+  useEffect(() => { void trackStoreEvent({ type: 'acquisition_visit', metadata: { source: 'telegram_webapp' } }); }, []);
+
   useEffect(() => {
     const previousTitle = document.title;
     document.title = 'Shopping Cambodia';
@@ -61,29 +63,33 @@ export default function TelegramShopApp() {
 
 
       try {
-        const [session] = await Promise.all([
-          telegramApi.session(),
-          (async () => {
-            await seedDatabaseIfEmpty();
-            const [pSnap, cSnap] = await Promise.all([
-              getDocs(collection(db, 'products')),
-              getDocs(collection(db, 'categories')),
-            ]);
-            setProducts(pSnap.docs.map((d) => d.data() as Product));
-            setCategories(cSnap.docs.map((d) => d.data() as Category));
-          })(),
-        ]);
+        // (2) Frontend passes Telegram's raw, signed InitData to the backend.
+        const session = await telegramApi.session(tg.initData);
 
-        if (!session?.authenticated || !session?.user?.id || !session?.firebaseCustomToken) {
+        // (3) Backend must validate Telegram and sync it to an existing
+        // Shopping Cambodia/Firebase account before the storefront continues.
+        if (!session?.authenticated || !session?.sync?.validatedInitData || !session?.sync?.accountSynced || !session?.user?.id || !session?.firebaseCustomToken) {
           throw new Error('Telegram automatic sign-in failed.');
         }
 
-        // Sign into the SAME Firebase account already used by the website.
+        // Backend returns a Firebase custom token for the SAME existing web
+        // account. The Mini App never asks for email/password.
         const credential = await signInWithCustomToken(auth, session.firebaseCustomToken);
         if (credential.user.uid !== session.user.firebaseUid) {
-          throw new Error('Telegram account link returned an unexpected Firebase user.');
+          throw new Error('Telegram account sync returned an unexpected Firebase user.');
         }
         setUser(session.user as TelegramMiniAppUser);
+        console.info('[Telegram Mini App] backend account sync complete', session.sync);
+
+        // Only access account/database-backed storefront data AFTER Firebase
+        // authentication succeeds. This also works with secure Firestore rules.
+        await seedDatabaseIfEmpty();
+        const [pSnap, cSnap] = await Promise.all([
+          getDocs(collection(db, 'products')),
+          getDocs(collection(db, 'categories')),
+        ]);
+        setProducts(pSnap.docs.map((d) => d.data() as Product));
+        setCategories(cSnap.docs.map((d) => d.data() as Category));
       } catch (error) {
         setFatalError(error instanceof Error ? error.message : 'Could not open Telegram shop.');
       } finally {

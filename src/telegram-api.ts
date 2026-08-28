@@ -17,7 +17,12 @@ async function telegramRequest<T>(path: string, options: RequestInit = {}): Prom
     },
   });
   const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(payload.error ?? `Telegram request failed (${response.status}).`);
+  if (!response.ok) {
+    const error = new Error(payload.error ?? `Telegram request failed (${response.status}).`) as Error & { code?: string; details?: unknown };
+    error.code = payload.code;
+    error.details = payload;
+    throw error;
+  }
   return payload as T;
 }
 
@@ -37,7 +42,10 @@ async function createAccountLink(firebaseIdToken: string) {
 
 export const telegramApi = {
   createAccountLink,
-  session: () => telegramRequest<any>('/session', { method: 'POST', body: JSON.stringify({}) }),
+  session: (initData?: string) => telegramRequest<any>('/session', {
+    method: 'POST',
+    body: JSON.stringify({ initData: initData ?? telegramInitData() }),
+  }),
   createOrder: (payload: {
     customerName: string;
     customerPhone: string;
