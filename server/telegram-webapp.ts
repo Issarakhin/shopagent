@@ -89,7 +89,11 @@ export function validateTelegramInitData(initData: string): TelegramWebUser {
 
 function telegramAuth(req: TelegramRequest, res: Response, next: NextFunction) {
   try {
-    const initData = String(req.header('x-telegram-init-data') ?? req.body?.initData ?? '');
+    // Primary Mini App flow: frontend passes the raw signed initData in the
+    // request body. The header remains supported for backward compatibility.
+    const bodyInitData = typeof req.body?.initData === 'string' ? req.body.initData : '';
+    const headerInitData = String(req.header('x-telegram-init-data') ?? '');
+    const initData = bodyInitData || headerInitData;
     req.telegramInitData = initData;
     const payload = validateTelegramInitDataPayload(initData);
     req.telegramUser = payload.user;
@@ -119,7 +123,10 @@ async function findTelegramChatProfile(user: TelegramWebUser): Promise<TelegramC
 
   // Support number-typed and string-typed chat IDs from older bot records.
   const numericId = Number(user.id);
-  for (const field of ['chatId', 'telegramUserId', 'userId'] as const) {
+  // `userId` is reserved for the Shopping Cambodia/Firebase account UID.
+  // Never use it as a Telegram identifier; older code did this and could
+  // overwrite the web-account mapping with the Telegram numeric ID.
+  for (const field of ['chatId', 'telegramUserId'] as const) {
     for (const candidate of [user.id, ...(Number.isSafeInteger(numericId) ? [numericId] : [])]) {
       const query = await chats.where(field, '==', candidate).limit(1).get();
       if (!query.empty) {
@@ -208,6 +215,7 @@ async function consumeAccountLinkIfPresent(user: TelegramWebUser, match: Telegra
   }
 
   const now = new Date().toISOString();
+  const identityRef = db.collection('telegramIdentities').doc(user.id);
   await db.runTransaction(async (tx) => {
     const freshLink = await tx.get(linkRef);
     if (!freshLink.exists || freshLink.data()?.status !== 'pending') {
@@ -229,12 +237,24 @@ async function consumeAccountLinkIfPresent(user: TelegramWebUser, match: Telegra
     tx.set(match.ref, {
       chatId: match.chatId,
       telegramUserId: user.id,
+      // `userId` means the Shopping Cambodia account UID, not Telegram ID.
+      userId: firebaseUid,
       firebaseUid,
       linkedFirebaseUid: firebaseUid,
       linkedAccount: true,
       telegramUsername: user.username ?? '',
       lastSeenAt: now,
       lastMiniAppSeenAt: now,
+    }, { merge: true });
+
+    // Canonical fast lookup used on every future Mini App launch.
+    tx.set(identityRef, {
+      telegramUserId: user.id,
+      telegramChatId: match.chatId,
+      firebaseUid,
+      linkedAccount: true,
+      updatedAt: now,
+      createdAt: now,
     }, { merge: true });
 
     tx.set(linkRef, {
@@ -250,32 +270,55 @@ async function consumeAccountLinkIfPresent(user: TelegramWebUser, match: Telegra
   return true;
 }
 
-async function resolveExistingFirebaseUid(user: TelegramWebUser, match: TelegramChatProfile): Promise<string> {
+type FirebaseIdentityResolution = {
+  firebaseUid: string;
+  source: 'telegram_identity' | 'telegram_chat' | 'users_collection';
+};
+
+async function validFirebaseUid(candidate: unknown): Promise<string | null> {
+  const auth = getAdminAuth();
+  if (!auth || typeof candidate !== 'string' || !candidate.trim()) return null;
+  const uid = candidate.trim();
+  try {
+    await auth.getUser(uid);
+    return uid;
+  } catch (error: any) {
+    if (error?.code === 'auth/user-not-found') return null;
+    throw error;
+  }
+}
+
+async function resolveExistingFirebaseUid(user: TelegramWebUser, match: TelegramChatProfile): Promise<FirebaseIdentityResolution> {
   const db = getAdminFirestore();
   const auth = getAdminAuth();
   if (!db || !auth) throw Object.assign(new Error('Firebase Admin is not configured on the backend.'), { code: 'FIREBASE_ADMIN_REQUIRED' });
 
-  // 1) Prefer an explicit account link already stored on telegramChats.
+  // 1) Fast canonical mapping created after the first successful sync/link.
+  const identitySnap = await db.collection('telegramIdentities').doc(user.id).get();
+  if (identitySnap.exists) {
+    const uid = await validFirebaseUid(identitySnap.data()?.firebaseUid);
+    if (uid) return { firebaseUid: uid, source: 'telegram_identity' };
+  }
+
+  // 2) Reuse the existing Telegram chat record. In this project `userId` is
+  // the web/Firebase account UID. Older Mini App code accidentally wrote the
+  // Telegram ID into this field; validating candidates against Firebase Auth
+  // prevents accepting that bad legacy value.
   const linkedCandidates = [
     match.data.firebaseUid,
     match.data.linkedFirebaseUid,
     match.data.accountUid,
     match.data.buyerUid,
     match.data.uid,
+    match.data.userId,
   ];
 
   for (const candidate of linkedCandidates) {
-    if (typeof candidate !== 'string' || !candidate.trim()) continue;
-    const uid = candidate.trim();
-    try {
-      await auth.getUser(uid);
-      return uid;
-    } catch (error: any) {
-      if (error?.code !== 'auth/user-not-found') throw error;
-    }
+    const uid = await validFirebaseUid(candidate);
+    if (uid) return { firebaseUid: uid, source: 'telegram_chat' };
   }
 
-  // 2) Find the EXISTING website account by Telegram identifiers stored on users/<uid>.
+  // 3) Find the EXISTING website account by Telegram identifiers stored on users/<uid>.
   const lookups: Array<[string, string | number]> = [
     ['telegramUserId', user.id],
     ['telegramChatId', match.chatId],
@@ -292,19 +335,15 @@ async function resolveExistingFirebaseUid(user: TelegramWebUser, match: Telegram
   for (const [field, value] of lookups) {
     const snap = await db.collection('users').where(field, '==', value).limit(1).get();
     if (snap.empty) continue;
-    const uid = snap.docs[0].id;
-    try {
-      await auth.getUser(uid);
-      return uid;
-    } catch (error: any) {
-      if (error?.code !== 'auth/user-not-found') throw error;
-    }
+    const uid = await validFirebaseUid(snap.docs[0].id);
+    if (uid) return { firebaseUid: uid, source: 'users_collection' };
   }
 
-  // Never silently create a second Firebase account for a Telegram user.
+  // We intentionally do not guess by Telegram username/name/email and do not
+  // create a second Firebase account. A trusted mapping must exist once.
   throw Object.assign(
     new Error('This Telegram account is not linked to an existing Shopping Cambodia web account.'),
-    { code: 'ACCOUNT_NOT_LINKED' },
+    { code: 'ACCOUNT_NOT_LINKED', telegramUserId: user.id, telegramChatId: match.chatId },
   );
 }
 
@@ -313,33 +352,52 @@ async function ensureExistingFirebaseIdentity(user: TelegramWebUser, match: Tele
   const auth = getAdminAuth();
   if (!db || !auth) throw Object.assign(new Error('Firebase Admin is not configured on the backend.'), { code: 'FIREBASE_ADMIN_REQUIRED' });
 
-  const firebaseUid = await resolveExistingFirebaseUid(user, match);
+  const resolution = await resolveExistingFirebaseUid(user, match);
+  const firebaseUid = resolution.firebaseUid;
   const firebaseUser = await auth.getUser(firebaseUid);
   const userRef = db.collection('users').doc(firebaseUid);
   const userSnap = await userRef.get();
   const existingUser = userSnap.data() ?? {};
   const now = new Date().toISOString();
 
-  // Keep the website account as the source of truth. Only add Telegram linkage fields.
-  await userRef.set({
-    uid: firebaseUid,
-    telegramUserId: user.id,
-    telegramChatId: match.chatId,
-    telegramUsername: user.username ?? '',
-    telegramLinked: true,
-    updatedAt: now,
-  }, { merge: true });
+  const identityRef = db.collection('telegramIdentities').doc(user.id);
 
-  // Persist the reverse link so future Mini App opens resolve immediately.
-  await match.ref.set({
-    chatId: match.chatId,
-    telegramUserId: user.id,
-    firebaseUid,
-    linkedFirebaseUid: firebaseUid,
-    linkedAccount: true,
-    lastSeenAt: now,
-    lastMiniAppSeenAt: now,
-  }, { merge: true });
+  // Sync all three references atomically: web account, bot chat record and the
+  // canonical Telegram -> Firebase identity map.
+  await db.runTransaction(async (tx) => {
+    tx.set(userRef, {
+      uid: firebaseUid,
+      telegramUserId: user.id,
+      telegramChatId: match.chatId,
+      telegramUsername: user.username ?? '',
+      telegramLinked: true,
+      telegramSyncSource: resolution.source,
+      lastTelegramMiniAppLoginAt: now,
+      updatedAt: now,
+    }, { merge: true });
+
+    tx.set(match.ref, {
+      chatId: match.chatId,
+      telegramUserId: user.id,
+      userId: firebaseUid,
+      firebaseUid,
+      linkedFirebaseUid: firebaseUid,
+      linkedAccount: true,
+      telegramUsername: user.username ?? '',
+      lastSeenAt: now,
+      lastMiniAppSeenAt: now,
+    }, { merge: true });
+
+    tx.set(identityRef, {
+      telegramUserId: user.id,
+      telegramChatId: match.chatId,
+      firebaseUid,
+      linkedAccount: true,
+      syncSource: resolution.source,
+      lastSyncedAt: now,
+      updatedAt: now,
+    }, { merge: true });
+  });
 
   const customToken = await auth.createCustomToken(firebaseUid, {
     provider: 'telegram',
@@ -351,6 +409,8 @@ async function ensureExistingFirebaseIdentity(user: TelegramWebUser, match: Tele
     customToken,
     firebaseUser,
     profile: existingUser,
+    syncSource: resolution.source,
+    syncedAt: now,
   };
 }
 
@@ -363,7 +423,8 @@ async function upsertTelegramUser(user: TelegramWebUser, startParam?: string) {
   const profile = {
     chatId: match.chatId,
     telegramUserId: user.id,
-    userId: user.id,
+    // userId is the Shopping Cambodia/Firebase account UID.
+    userId: identity.firebaseUid,
     customerId: identity.firebaseUid,
     firebaseUid: identity.firebaseUid,
     linkedFirebaseUid: identity.firebaseUid,
@@ -386,10 +447,20 @@ async function upsertTelegramUser(user: TelegramWebUser, startParam?: string) {
     lastMiniAppSeenAt: now,
   };
   await match.ref.set(profile, { merge: true });
-  return { ...profile, firestoreDocumentId: match.ref.id, firebaseCustomToken: identity.customToken };
+  return { ...profile, firestoreDocumentId: match.ref.id, firebaseCustomToken: identity.customToken, syncSource: identity.syncSource, syncedAt: identity.syncedAt };
 }
 
 export const telegramWebAppRouter = Router();
+
+// Safe deployment diagnostic. It never returns tokens or credentials.
+telegramWebAppRouter.get('/health', (_req, res) => {
+  res.json({
+    ok: true,
+    telegramBotConfigured: Boolean(process.env.TELEGRAM_BOT_TOKEN),
+    firebaseAdminConfigured: Boolean(getAdminFirestore() && getAdminAuth()),
+    flow: 'telegram_initdata_backend_sync',
+  });
+});
 
 telegramWebAppRouter.post('/link/start', async (req, res) => {
   try {
@@ -412,6 +483,12 @@ telegramWebAppRouter.post('/session', telegramAuth, async (req: TelegramRequest,
   try {
     const user = req.telegramUser!;
     const profile = await upsertTelegramUser(user, req.telegramStartParam);
+    console.info('[Telegram Mini App] account synced', {
+      telegramUserId: user.id,
+      telegramChatId: profile.chatId,
+      firebaseUid: profile.firebaseUid,
+      source: profile.syncSource,
+    });
     res.json({
       ok: true,
       authenticated: true,
@@ -432,11 +509,26 @@ telegramWebAppRouter.post('/session', telegramAuth, async (req: TelegramRequest,
         address: profile.address,
         linkedAccount: true,
       },
+      sync: {
+        validatedInitData: true,
+        accountSynced: true,
+        firebaseUid: profile.firebaseUid,
+        telegramUserId: user.id,
+        telegramChatId: profile.chatId,
+        source: profile.syncSource,
+        syncedAt: profile.syncedAt,
+      },
     });
   } catch (error: any) {
     const code = error?.code ?? 'TELEGRAM_SESSION_FAILED';
     const status = code === 'ACCOUNT_NOT_LINKED' ? 403 : ['FIRESTORE_ADMIN_REQUIRED', 'FIREBASE_ADMIN_REQUIRED'].includes(code) ? 503 : 500;
-    res.status(status).json({ error: error instanceof Error ? error.message : String(error), code });
+    res.status(status).json({
+      error: error instanceof Error ? error.message : String(error),
+      code,
+      telegramUserId: error?.telegramUserId ?? req.telegramUser?.id,
+      telegramChatId: error?.telegramChatId,
+      accountSynced: false,
+    });
   }
 });
 
@@ -511,7 +603,8 @@ telegramWebAppRouter.post('/orders', telegramAuth, async (req: TelegramRequest, 
       transaction.set(chatProfile.ref, {
         chatId: chatProfile.chatId,
         telegramUserId: user.id,
-        userId: user.id,
+        // Preserve the Shopping Cambodia/Firebase UID mapping after checkout.
+        userId: identity.firebaseUid,
         customerId: identity.firebaseUid,
         firebaseUid: identity.firebaseUid,
         linkedFirebaseUid: identity.firebaseUid,
