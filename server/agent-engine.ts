@@ -1108,6 +1108,7 @@ async function publishTelegramCampaign(campaign: Campaign, approvalId: string): 
   let failed = 0;
   let skipped = 0;
   let duplicatePrevented = 0;
+  let firstSendError = '';
   const sentChatIds: string[] = [];
   const skippedChatIds: string[] = [];
   for (const subscriber of subscribers) {
@@ -1148,9 +1149,11 @@ async function publishTelegramCampaign(campaign: Campaign, approvalId: string): 
       });
     } catch (error) {
       failed += 1;
+      const message = error instanceof Error ? error.message : String(error);
+      if (!firstSendError) firstSendError = message;
       agentStore.mutate((draft) => {
         const recipient = draft.campaignRecipients.find((item) => item.id === recipientId);
-        if (recipient) Object.assign(recipient, { status: 'failed', error: error instanceof Error ? error.message : String(error), retryCount: 1 });
+        if (recipient) Object.assign(recipient, { status: 'failed', error: message, retryCount: 1 });
       });
     }
   }
@@ -1176,7 +1179,7 @@ async function publishTelegramCampaign(campaign: Campaign, approvalId: string): 
   }
   if (sent === 0) {
     const reason = failed
-      ? 'Telegram publishing failed for every eligible recipient.'
+      ? `Telegram publishing failed for every eligible recipient. Reason: ${firstSendError || 'unknown'}.${/TELEGRAM_LIVE_SEND/.test(firstSendError) ? ' Set TELEGRAM_LIVE_SEND=true on the backend.' : /chat not found|bot was blocked|can't initiate|Forbidden/i.test(firstSendError) ? ' The recipient has not pressed Start on the bot (Telegram blocks messages until they do).' : /bot token|unauthorized|not configured/i.test(firstSendError) ? ' Check TELEGRAM_BOT_TOKEN.' : ''}`
       : skipped
         ? `No recipients were eligible right now (${skipped} skipped — usually the marketing frequency cap or missing consent). Set TELEGRAM_MIN_RESEND_HOURS=0 to allow immediate re-sends while testing.`
         : duplicatePrevented
