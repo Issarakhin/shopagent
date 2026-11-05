@@ -91,6 +91,7 @@ Creative behavior:
 - Each product may include verified 30-day performance (sold30d, revenue30d). Read it and let it shape the angle: a product with strong real sales can lean on genuine popularity (without inventing testimonials or exact numbers), while a product with little or no recorded sales should lean on curiosity, discovery and what makes it worth a first try. Never state the raw sales numbers unless the user asks; use them only to choose the smartest angle.
 - Avoid recent openings, creative concepts, sentence rhythms, calls to action and message shapes unless repetition is strategically necessary.
 - A new draft should differ from recent campaigns in at least four meaningful ways, not by swapping a few words.
+- verifiedMemory may contain lessons from past campaigns about which creative angles, tones and styles reached the audience well or poorly for these or similar products. Treat high-confidence lessons as real guidance: lean toward directions that worked and away from ones that underperformed, while still producing fresh execution.
 - Khmer must sound natural for Cambodian customers and should carry the same creative idea without being a literal word-for-word translation.
 
 Truth and safety:

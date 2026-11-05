@@ -241,7 +241,41 @@ export function learnFromCampaign(campaignId: string): void {
   if (!campaign) return;
   const total = campaign.sentCount + campaign.failedCount + campaign.skippedCount;
   const deliveryRate = total > 0 ? campaign.sentCount / total : 0;
+  const products = readProducts();
+  const productNames = campaign.productIds
+    .map((pid) => products.find((p) => p.id === pid)?.name ?? pid)
+    .join(', ') || 'selected products';
+  // Did this creative approach actually reach people? Use delivery as the
+  // outcome signal (the only verified engagement data we have today).
+  const outcome = deliveryRate >= 0.8 ? 'worked well' : deliveryRate >= 0.4 ? 'had mixed reach' : 'underperformed';
+  const angle = campaign.creativeAngle || 'unspecified angle';
+  const tone = campaign.tone || 'unspecified tone';
+  const style = campaign.contentStyle || 'free-form';
+  const purpose = campaign.campaignPurpose || 'promotion';
+
   agentStore.mutate((draft) => {
+    // 1. A creative-learning memory the drafter can actually learn from: it ties
+    //    the angle/tone/style used to the real outcome, so future campaigns can
+    //    lean into what worked and avoid what did not.
+    draft.memories.unshift({
+      id: `memory_learning_${campaign.id}_${Date.now()}`,
+      type: 'learning',
+      topic: `campaign_creative:${purpose}`,
+      content: `For ${productNames}, a "${angle}" angle with a ${tone} tone in a ${style} style ${outcome} (reached ${campaign.sentCount}/${total}, ${Math.round(deliveryRate * 100)}%). ${deliveryRate >= 0.8 ? 'Reuse this kind of creative direction for similar products.' : 'Prefer a different creative direction next time for similar products.'}`,
+      confidence: total >= 10 ? 0.8 : total >= 3 ? 0.6 : 0.45,
+      source: `campaign:${campaign.id}`,
+      createdAt: now(),
+      metadata: {
+        productIds: campaign.productIds,
+        creativeAngle: angle,
+        tone,
+        contentStyle: style,
+        campaignPurpose: purpose,
+        deliveryRate,
+        effective: deliveryRate >= 0.8,
+      },
+    });
+    // 2. Keep the operational delivery record too.
     draft.memories.unshift({
       id: `memory_campaign_${campaign.id}_${Date.now()}`,
       type: 'outcome',

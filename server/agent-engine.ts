@@ -687,10 +687,18 @@ async function executeSkill(workflow: Workflow, step: WorkflowStep): Promise<Ski
           contentStyle: campaign.contentStyle,
           contentShape: campaign.contentShape,
         }));
+      // Learn preferentially from past campaigns about the SAME products, then
+      // fall back to general verified lessons — so creative feedback is relevant.
       const verifiedMemory = currentState.memories
         .filter((memory) => memory.confidence >= 0.5 && (memory.type === 'outcome' || memory.type === 'learning'))
+        .map((memory) => {
+          const memProductIds = Array.isArray(memory.metadata?.productIds) ? (memory.metadata!.productIds as unknown[]).map(String) : [];
+          const relevant = memProductIds.some((pid) => selectedIds.has(pid));
+          return { memory, relevant };
+        })
+        .sort((a, b) => Number(b.relevant) - Number(a.relevant))
         .slice(0, 12)
-        .map((memory) => ({ topic: memory.topic, content: memory.content, confidence: memory.confidence }));
+        .map(({ memory }) => ({ topic: memory.topic, content: memory.content, confidence: memory.confidence }));
       const userRequest = String(input.userRequest ?? input.campaignGoal ?? workflow.goal ?? `Promote ${selected.map((product) => product.name).join(', ')}`);
       const campaignGoal = String(input.campaignGoal ?? userRequest);
       const requestedAudience = typeof input.targetAudience === 'string' && input.targetAudience.trim()
@@ -988,6 +996,12 @@ async function publishTelegramCampaign(campaign: Campaign, approvalId: string): 
       if (sent > 0) target.publishedAt = now();
     }
   });
+  // Close the learning loop automatically: every campaign that actually reached
+  // someone records what creative approach was used and how it performed, so the
+  // next draft can learn from it without relying on a separate analytics step.
+  if (sent > 0) {
+    try { learnFromCampaign(campaign.id); } catch { /* learning must never fail a send */ }
+  }
   if (sent === 0) {
     const reason = failed
       ? 'Telegram publishing failed for every eligible recipient.'
