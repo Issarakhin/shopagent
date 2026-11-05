@@ -409,4 +409,32 @@ export interface AgentState {
   marketIntelligenceRuns: MarketIntelligenceRun[];
   marketTrends: any[];
   dailyBoostRecommendations: any[];
+  shipments: Shipment[];
+  deliveryExceptions: DeliveryException[];
+}
+
+export interface Shipment {
+  id: string;
+  orderId: string;
+  customerName: string;
+  destination: string;
+  itemCount: number;
+  status: 'ready_for_carrier_booking' | 'booked' | 'in_transit' | 'delivered' | 'cancelled';
+  carrier?: string;
+  trackingNumber?: string;
+  note?: string;
+  workflowId?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DeliveryException {
+  id: string;
+  orderId: string;
+  type: 'delayed' | 'address_issue' | 'damaged' | 'lost' | 'other';
+  severity: 'low' | 'medium' | 'high';
+  description: string;
+  status: 'open' | 'resolved';
+  workflowId?: string;
+  createdAt: string;
 }

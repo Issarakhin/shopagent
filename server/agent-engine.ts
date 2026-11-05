@@ -600,8 +600,29 @@ async function executeSkill(workflow: Workflow, step: WorkflowStep): Promise<Ski
       return success(step.skill, step.action, ready ? 'Order is ready for fulfillment planning.' : 'Order is not ready for fulfillment.', { ready, lines, orderStatus: order.status });
     }
 
-    case 'logistics:create_shipment':
-      return success(step.skill, step.action, 'Shipment plan created. Carrier booking is not connected yet.', { shipmentId: id('shipment'), status: 'ready_for_carrier_booking' }, ['External carrier integration is not configured.']);
+    case 'logistics:create_shipment': {
+      const orderId = String(input.orderId ?? '');
+      const order = readOrders().find((item) => item.id === orderId);
+      if (!order) return fail(step.skill, step.action, 'ORDER_NOT_FOUND', 'An exact valid orderId is required to create a shipment.');
+      const shipmentId = id('shipment');
+      const trackingNumber = `SC-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+      const shipment = {
+        id: shipmentId,
+        orderId,
+        customerName: order.customerName,
+        destination: order.customerAddress,
+        itemCount: order.items.reduce((sum, line) => sum + line.quantity, 0),
+        status: 'ready_for_carrier_booking' as const,
+        trackingNumber,
+        carrier: typeof input.carrier === 'string' ? input.carrier : undefined,
+        note: typeof input.reason === 'string' ? input.reason : undefined,
+        workflowId: workflow.id,
+        createdAt: now(),
+        updatedAt: now(),
+      };
+      agentStore.mutate((draft) => { draft.shipments.unshift(shipment); });
+      return success(step.skill, step.action, `Shipment ${trackingNumber} created for order ${orderId}.`, { shipment }, ['External carrier booking is not connected; tracking number is internal.']);
+    }
 
     case 'logistics:check_delivery_delay': {
       const cutoff = Date.now() - 5 * 24 * 60 * 60 * 1000;
@@ -609,8 +630,27 @@ async function executeSkill(workflow: Workflow, step: WorkflowStep): Promise<Ski
       return success(step.skill, step.action, `Found ${delayed.length} potentially delayed orders.`, { delayed });
     }
 
-    case 'logistics:report_delivery_exception':
-      return success(step.skill, step.action, 'Delivery exception recorded.', { exceptionId: id('delivery_exception') });
+    case 'logistics:report_delivery_exception': {
+      const orderId = String(input.orderId ?? '');
+      const order = readOrders().find((item) => item.id === orderId);
+      if (!order) return fail(step.skill, step.action, 'ORDER_NOT_FOUND', 'An exact valid orderId is required to report a delivery exception.');
+      const allowedTypes = ['delayed', 'address_issue', 'damaged', 'lost', 'other'] as const;
+      const type = allowedTypes.includes(input.type as typeof allowedTypes[number]) ? input.type as typeof allowedTypes[number] : 'other';
+      const allowedSeverity = ['low', 'medium', 'high'] as const;
+      const severity = allowedSeverity.includes(input.severity as typeof allowedSeverity[number]) ? input.severity as typeof allowedSeverity[number] : 'medium';
+      const exception = {
+        id: id('delivery_exception'),
+        orderId,
+        type,
+        severity,
+        description: String(input.reason ?? input.description ?? `Delivery exception reported for order ${orderId}.`),
+        status: 'open' as const,
+        workflowId: workflow.id,
+        createdAt: now(),
+      };
+      agentStore.mutate((draft) => { draft.deliveryExceptions.unshift(exception); });
+      return success(step.skill, step.action, `Delivery exception recorded for order ${orderId} (${type}, ${severity}).`, { exception });
+    }
 
 
     case 'logistics:change_order_status': {
@@ -635,8 +675,22 @@ async function executeSkill(workflow: Workflow, step: WorkflowStep): Promise<Ski
       return success(step.skill, step.action, 'Approved order status change applied.', { orderId, previousStatus, newStatus: order.status, reason: String(input.reason ?? 'Approved order workflow update') });
     }
 
-    case 'marketing:prepare_telegram_message':
-      return success(step.skill, step.action, 'Telegram message draft prepared without sending.', { messageEn: 'Reviewable Shopping Cambodia campaign message.', messageKh: 'សារផ្សព្វផ្សាយ Shopping Cambodia សម្រាប់ពិនិត្យ។' });
+    case 'marketing:prepare_telegram_message': {
+      // Return the actual drafted campaign content for review, not a placeholder.
+      const campaignId = findCampaignId(input, dependencies);
+      const campaign = campaignId
+        ? agentStore.getState().campaigns.find((item) => item.id === campaignId)
+        : agentStore.getState().campaigns[0];
+      if (campaign && (campaign.telegramMessageEn || campaign.telegramMessageKh)) {
+        return success(step.skill, step.action, 'Telegram message prepared from the reviewed campaign draft.', {
+          campaignId: campaign.id,
+          messageEn: campaign.telegramMessageEn,
+          messageKh: campaign.telegramMessageKh,
+          combined: `${campaign.telegramMessageKh}\n\n${campaign.telegramMessageEn}`.trim(),
+        });
+      }
+      return fail(step.skill, step.action, 'NO_CAMPAIGN_CONTENT', 'No drafted campaign message is available to prepare. Create a campaign draft first.');
+    }
 
     case 'marketing:validate_campaign': {
       const campaignId = findCampaignId(input, dependencies);

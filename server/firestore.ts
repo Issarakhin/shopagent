@@ -68,6 +68,8 @@ function trimStateForFirestore(state: AgentState): AgentState {
     dailyBoostRecommendations: cap(state.dailyBoostRecommendations, 100),
     marketIntelligenceRuns: cap(state.marketIntelligenceRuns, 60),
     campaigns: cap(state.campaigns, 300),
+    shipments: cap(state.shipments, 300),
+    deliveryExceptions: cap(state.deliveryExceptions, 300),
   };
 }
 

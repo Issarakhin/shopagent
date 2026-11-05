@@ -109,7 +109,7 @@ function normalizeAgentState(raw: any): AgentState {
     'skills', 'workflows', 'approvals', 'campaigns', 'executions', 'auditLogs', 'memories',
     'boosts', 'cache', 'telegramSubscribers', 'pricingRecommendations', 'customerSegments',
     'inventoryForecasts', 'revenueOpportunities', 'events', 'dailyBoostRecommendations',
-    'marketTrends', 'marketIntelligenceRuns',
+    'marketTrends', 'marketIntelligenceRuns', 'shipments', 'deliveryExceptions',
   ];
   for (const field of arrayFields) {
     if (!Array.isArray(state[field])) state[field] = [];
