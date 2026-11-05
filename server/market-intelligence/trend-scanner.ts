@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import type { MarketTrendSignal } from '../types.js';
+import { fetchOpenAIWithRetry } from '../openai-service.js';
 
 export interface TrendScanProduct {
   id: string;
@@ -221,7 +222,7 @@ export async function scanCambodiaMarketTrends(products: TrendScanProduct[], req
 
   const instructions = `You are the Cambodia Market Trend Scanner for Shopping Cambodia.\n\nUse web search to find current, evidence-backed consumer and product demand signals relevant to Cambodia. Search both English-language and Khmer-language public web/media sources when useful. Focus on the last ${windowDays} days unless a seasonal event needs slightly wider context.\n\nPrioritize Cambodia-specific evidence: Cambodian media, retail and lifestyle coverage, food and recipe interest, agriculture and supply context, public consumer discussions indexed on the web, festivals, holidays, tourism demand, gifting, weather-linked demand, and product/category stories. Regional evidence may support a Cambodia trend only when the Cambodia relevance is explained.\n\nDo not call something a trend because of one weak source. Prefer multiple independent signals. Do not invent social-media metrics, search volumes, buyer counts, prices, discounts, shortages, or product facts. Only use product IDs from the supplied catalogue. A matched product is a candidate, not an instruction to publish or change anything.\n\nReturn at most ${maxResults} commercially relevant trends. Every trend must include at least one real evidence URL used during web search. Confidence must reflect evidence strength and Cambodia relevance.`;
 
-  const response = await fetch('https://api.openai.com/v1/responses', {
+  const response = await fetchOpenAIWithRetry('https://api.openai.com/v1/responses', {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,

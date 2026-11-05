@@ -6,6 +6,36 @@ const SKILLS: SkillId[] = [
   'business-planning', 'marketing', 'sales', 'inventory', 'finance', 'support', 'analytics', 'logistics',
 ];
 
+// Transient-failure retry for OpenAI calls. Retries on network errors and on
+// 429/5xx responses with exponential backoff; never retries 400/401/403 (a
+// schema or auth error will not fix itself). Keeps one transient blip from
+// failing a whole workflow.
+export async function fetchOpenAIWithRetry(url: string, init: RequestInit, attempts = 3): Promise<Response> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      const response = await fetch(url, init);
+      if (response.ok) return response;
+      // Retry only on rate-limit / server errors.
+      if (response.status === 429 || response.status >= 500) {
+        lastError = new Error(`OpenAI returned ${response.status}`);
+        if (attempt < attempts - 1) {
+          await new Promise((resolve) => setTimeout(resolve, 400 * 2 ** attempt + Math.floor(Math.random() * 200)));
+          continue;
+        }
+      }
+      return response; // non-retryable (e.g. 400/401) — let caller handle it
+    } catch (error) {
+      lastError = error;
+      if (attempt < attempts - 1) {
+        await new Promise((resolve) => setTimeout(resolve, 400 * 2 ** attempt + Math.floor(Math.random() * 200)));
+        continue;
+      }
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error('OpenAI request failed after retries.');
+}
+
 const ALWAYS_APPROVAL_ACTIONS = new Set([
   'publish_approved_campaign',
   'apply_approved_price',
@@ -520,7 +550,7 @@ export async function planWithOpenAI(command: string, context: Record<string, un
   }
 
   const memory = agentStore.getState().memories.slice(0, 15).map((item) => ({ topic: item.topic, content: item.content, confidence: item.confidence }));
-  const response = await fetch('https://api.openai.com/v1/responses', {
+  const response = await fetchOpenAIWithRetry('https://api.openai.com/v1/responses', {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
@@ -1012,7 +1042,7 @@ function campaignConstraintViolations(
 
 async function callCampaignModel(input: CampaignDraftInput, retryInstruction = ''): Promise<Omit<CampaignDraftOutput, 'similarityScore' | 'contentFingerprint' | 'source'>> {
   const brief = input.creativeBrief ?? interpretCampaignRequest(input.userRequest ?? input.campaignGoal, input.audience);
-  const response = await fetch('https://api.openai.com/v1/responses', {
+  const response = await fetchOpenAIWithRetry('https://api.openai.com/v1/responses', {
     method: 'POST',
     headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({
