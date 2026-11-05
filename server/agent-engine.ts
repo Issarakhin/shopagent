@@ -537,14 +537,62 @@ async function executeSkill(workflow: Workflow, step: WorkflowStep): Promise<Ski
       return success(step.skill, step.action, `Created ${segments.length} customer segments from real order history.`, { segments });
     }
 
-    case 'sales:create_offer_draft':
-      return success(step.skill, step.action, 'Offer draft prepared. No customer was contacted.', { draft: { subject: 'Shopping Cambodia offer', body: 'A reviewable offer draft based on verified products and availability.' } });
+    case 'sales:create_offer_draft': {
+      const orders = readOrders().filter((order) => order.status !== 'cancelled');
+      if (!orders.length) return fail(step.skill, step.action, 'NO_CUSTOMER_DATA', 'No customer order history is available to build a grounded offer.');
+      const products = readProducts();
+      const history = aggregateCustomerHistory(orders);
+      const requestedEmail = typeof input.customerEmail === 'string' ? input.customerEmail.toLowerCase() : '';
+      const depLead = Object.values(dependencies).flatMap((value) => (value && typeof value === 'object' && Array.isArray((value as Record<string, unknown>).leads)) ? (value as Record<string, unknown>).leads as Array<Record<string, unknown>> : [])[0];
+      const depEmail = typeof depLead?.email === 'string' ? depLead.email.toLowerCase() : '';
+      const targetKey = (requestedEmail && history.has(requestedEmail) && requestedEmail)
+        || (depEmail && history.has(depEmail) && depEmail)
+        || [...history.values()].sort((a, b) => b.revenue - a.revenue)[0].email;
+      const customer = history.get(targetKey)!;
+      // Recommend a relevant, in-stock product: first a repeat of something they
+      // bought, otherwise a top available product in their favourite category.
+      const boughtInStock = customer.productIds
+        .map((pid) => products.find((p) => p.id === pid))
+        .find((p) => p && availableToPromise(p) > 0);
+      const favCategory = customer.topCategory;
+      const categoryPick = products.find((p) => p.category === favCategory && availableToPromise(p) > 0 && !customer.productIds.includes(p.id));
+      const recommended = boughtInStock ?? categoryPick ?? products.find((p) => availableToPromise(p) > 0);
+      const topProducts = customer.productNames.slice(0, 3).join(', ') || 'your past purchases';
+      const subject = recommended ? `A ${recommended.name} pick for you, ${customer.name}` : `An offer for you, ${customer.name}`;
+      const body = recommended
+        ? `Hi ${customer.name}, thank you for your ${customer.orders} order${customer.orders === 1 ? '' : 's'} with Shopping Cambodia (you've enjoyed ${topProducts}). Based on what you buy, you may like ${recommended.name} ($${recommended.price.toFixed(2)}/${recommended.unit}), which is in stock now. Reply if you'd like us to set some aside.`
+        : `Hi ${customer.name}, thank you for your ${customer.orders} order${customer.orders === 1 ? '' : 's'} with Shopping Cambodia. We'd love to help you find your next favourite — reply and tell us what you're after.`;
+      return success(step.skill, step.action, `Personalized offer draft prepared for ${customer.name}. No customer was contacted.`, {
+        draft: {
+          customerEmail: customer.email,
+          customerName: customer.name,
+          subject,
+          body,
+          recommendedProductId: recommended?.id,
+          basedOn: { orders: customer.orders, revenue: Number(customer.revenue.toFixed(2)), topProducts: customer.productNames.slice(0, 3), favouriteCategory: favCategory, lastOrderAt: customer.lastOrderAt },
+        },
+      });
+    }
 
     case 'sales:update_pipeline':
       return success(step.skill, step.action, 'Pipeline update recorded.', { stage: input.stage ?? 'engaged' });
 
-    case 'sales:prepare_follow_up':
-      return success(step.skill, step.action, 'Consent-aware follow-up draft prepared.', { message: 'Thank you for shopping with Shopping Cambodia. Reply only if you would like product updates.' });
+    case 'sales:prepare_follow_up': {
+      const orders = readOrders().filter((order) => order.status !== 'cancelled');
+      const history = aggregateCustomerHistory(orders);
+      const requestedEmail = typeof input.customerEmail === 'string' ? input.customerEmail.toLowerCase() : '';
+      const target = (requestedEmail && history.get(requestedEmail))
+        ?? [...history.values()].sort((a, b) => new Date(b.lastOrderAt).getTime() - new Date(a.lastOrderAt).getTime())[0];
+      if (!target) return success(step.skill, step.action, 'Consent-aware follow-up draft prepared.', { message: 'Thank you for shopping with Shopping Cambodia. Reply only if you would like product updates.' });
+      const lastItems = target.productNames.slice(0, 2).join(' and ') || 'your recent order';
+      const message = `Hi ${target.name}, thank you for choosing Shopping Cambodia for ${lastItems}. We hope everything was great. If you'd like occasional updates on products you care about, just reply YES — otherwise no need to do anything.`;
+      return success(step.skill, step.action, `Consent-aware follow-up draft prepared for ${target.name}.`, {
+        customerEmail: target.email,
+        customerName: target.name,
+        message,
+        basedOn: { lastOrderAt: target.lastOrderAt, recentProducts: target.productNames.slice(0, 2) },
+      });
+    }
 
     case 'support:categorize_ticket':
       return success(step.skill, step.action, 'Support request categorized.', { category: input.orderId ? 'order_help' : 'general', priority: 'normal' });
@@ -914,6 +962,48 @@ function findRecommendationId(dependencies: Record<string, unknown>): string | u
     }
   }
   return undefined;
+}
+
+// Aggregate a customer's verified order history by email, so sales actions can
+// personalize offers and follow-ups from real purchases instead of generic text.
+interface CustomerHistory {
+  email: string;
+  name: string;
+  orders: number;
+  revenue: number;
+  lastOrderAt: string;
+  productIds: string[];
+  productNames: string[];
+  topCategory: string;
+}
+
+function aggregateCustomerHistory(orders: ReturnType<typeof readOrders>): Map<string, CustomerHistory> {
+  const products = readProducts();
+  const categoryOf = new Map(products.map((p) => [p.id, p.category]));
+  const map = new Map<string, CustomerHistory & { categoryCounts: Record<string, number> }>();
+  for (const order of orders) {
+    const key = order.customerEmail.toLowerCase();
+    const current = map.get(key) ?? { email: key, name: order.customerName, orders: 0, revenue: 0, lastOrderAt: order.createdAt, productIds: [], productNames: [], topCategory: '', categoryCounts: {} };
+    current.orders += 1;
+    current.revenue += order.totalAmount;
+    if (new Date(order.createdAt).getTime() > new Date(current.lastOrderAt).getTime()) current.lastOrderAt = order.createdAt;
+    for (const item of order.items) {
+      if (!current.productIds.includes(item.productId)) {
+        current.productIds.push(item.productId);
+        current.productNames.push(item.productName);
+      }
+      const category = categoryOf.get(item.productId);
+      if (category) current.categoryCounts[category] = (current.categoryCounts[category] ?? 0) + item.quantity;
+    }
+    map.set(key, current);
+  }
+  const result = new Map<string, CustomerHistory>();
+  for (const [key, value] of map) {
+    const topCategory = Object.entries(value.categoryCounts).sort((a, b) => b[1] - a[1])[0]?.[0] ?? '';
+    const { categoryCounts, ...rest } = value;
+    result.set(key, { ...rest, topCategory });
+  }
+  return result;
 }
 
 function isSubscriberEligible(subscriber: import('./types.js').TelegramSubscriber, segmentIds: string[]): boolean {
