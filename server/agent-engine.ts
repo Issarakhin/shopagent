@@ -594,11 +594,39 @@ async function executeSkill(workflow: Workflow, step: WorkflowStep): Promise<Ski
       });
     }
 
-    case 'support:categorize_ticket':
-      return success(step.skill, step.action, 'Support request categorized.', { category: input.orderId ? 'order_help' : 'general', priority: 'normal' });
+    case 'support:categorize_ticket': {
+      const text = String(input.requestText ?? input.reason ?? '').toLowerCase();
+      const category = /refund|money back|charge|payment/.test(text) ? 'refund'
+        : /where|track|delivery|arrive|ship|late|delay/.test(text) ? 'delivery'
+        : /broken|damaged|wrong|missing|defect/.test(text) ? 'product_issue'
+        : input.orderId ? 'order_help'
+        : 'general';
+      const priority = /urgent|asap|angry|refund|damaged|wrong|not received/.test(text) ? 'high' : 'normal';
+      return success(step.skill, step.action, `Support request categorized as ${category} (${priority} priority).`, { category, priority, orderId: input.orderId });
+    }
 
-    case 'support:draft_reply':
-      return success(step.skill, step.action, 'Support reply drafted without sending.', { reply: 'We are reviewing your request using the verified order information available to the support team.' });
+    case 'support:draft_reply': {
+      // Ground the reply in the real order when one is referenced, so support is
+      // specific and accurate instead of a generic holding message.
+      const orderId = typeof input.orderId === 'string' ? input.orderId : '';
+      const order = orderId ? readOrders().find((item) => item.id === orderId) : undefined;
+      if (orderId && !order) return fail(step.skill, step.action, 'ORDER_NOT_FOUND', 'The referenced order was not found.');
+      let reply: string;
+      if (order) {
+        const itemSummary = order.items.map((line) => `${line.quantity}× ${line.productName}`).join(', ');
+        const statusText: Record<string, string> = {
+          pending: 'is being prepared',
+          processing: 'is being processed and will ship soon',
+          shipped: 'has shipped and is on the way',
+          delivered: 'has been delivered',
+          cancelled: 'was cancelled',
+        };
+        reply = `Hi ${order.customerName}, thank you for reaching out about order ${order.id} (${itemSummary}, total $${order.totalAmount.toFixed(2)}). Your order ${statusText[order.status] ?? `is currently "${order.status}"`}. ${order.status === 'shipped' ? 'Please allow a little time for delivery to your address.' : order.status === 'delivered' ? 'We hope everything arrived in good condition — let us know if anything is not right.' : 'We will keep you updated on its progress.'} Is there anything else we can help with?`;
+      } else {
+        reply = 'Thank you for contacting Shopping Cambodia support. To help you quickly, could you share your order number? We will then look into it using your verified order details.';
+      }
+      return success(step.skill, step.action, 'Support reply drafted from verified order data without sending.', { reply, orderId: order?.id });
+    }
 
     case 'support:escalate_ticket':
       return success(step.skill, step.action, 'Support escalation recorded.', { escalationId: id('support_escalation') });

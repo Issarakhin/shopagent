@@ -539,6 +539,26 @@ async function startServer() {
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`Shopping Cambodia Full-Stack Server running on http://localhost:${PORT}`);
+    // Surface config readiness in the boot log so a missing production secret is
+    // obvious immediately, instead of appearing later as a confusing failure.
+    const checks: Array<[string, boolean, boolean]> = [
+      ['OPENAI_API_KEY', Boolean(process.env.OPENAI_API_KEY), true],
+      ['FIREBASE_SERVICE_ACCOUNT_JSON', Boolean(process.env.FIREBASE_SERVICE_ACCOUNT_JSON || process.env.FIREBASE_SERVICE_ACCOUNT), true],
+      ['TELEGRAM_BOT_TOKEN', Boolean(process.env.TELEGRAM_BOT_TOKEN), true],
+      ['ADMIN_API_KEY', Boolean(process.env.ADMIN_API_KEY), true],
+      ['TELEGRAM_LIVE_SEND=true', process.env.TELEGRAM_LIVE_SEND === 'true', false],
+      ['PAYMENT_REFUND_ENDPOINT+TOKEN', Boolean(process.env.PAYMENT_REFUND_ENDPOINT && process.env.PAYMENT_REFUND_TOKEN), false],
+    ];
+    console.log('[config] Integration readiness:');
+    for (const [name, ok, required] of checks) {
+      console.log(`[config]   ${ok ? '✓' : '✗'} ${name}${!ok && required ? '  (REQUIRED for production)' : ''}`);
+    }
+    const missingRequired = checks.filter(([, ok, required]) => required && !ok).map(([name]) => name);
+    if (missingRequired.length) {
+      console.warn(`[config] WARNING: missing required config: ${missingRequired.join(', ')}. The agent will not be fully functional until these are set.`);
+    } else {
+      console.log('[config] All required production integrations are configured.');
+    }
   });
 
   // Load Firestore data AFTER the port is bound so a slow/failing Firestore

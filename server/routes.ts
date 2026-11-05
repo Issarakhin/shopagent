@@ -47,11 +47,36 @@ function requireRole(...roles: string[]) {
 
 agentRouter.get('/health', (_req, res) => {
   const state = agentStore.getState();
+  // Report which production integrations are configured, without leaking any
+  // secret values — just booleans. This makes a missing key obvious instead of
+  // surfacing later as a confusing runtime failure.
+  const config = {
+    openai: Boolean(process.env.OPENAI_API_KEY),
+    firestore: Boolean(process.env.FIREBASE_SERVICE_ACCOUNT_JSON || process.env.FIREBASE_SERVICE_ACCOUNT),
+    telegramBot: Boolean(process.env.TELEGRAM_BOT_TOKEN),
+    telegramLiveSend: process.env.TELEGRAM_LIVE_SEND === 'true',
+    adminKey: Boolean(process.env.ADMIN_API_KEY),
+    paymentRefund: Boolean(process.env.PAYMENT_REFUND_ENDPOINT && process.env.PAYMENT_REFUND_TOKEN),
+    marketIntelligence: process.env.MARKET_TREND_SCAN_ENABLED === 'true',
+  };
+  // The agent cannot do its core job (smart campaigns to real subscribers)
+  // without these three.
+  const productionReady = config.openai && config.firestore && config.telegramBot && config.adminKey;
+  const missing = [
+    !config.openai && 'OPENAI_API_KEY',
+    !config.firestore && 'FIREBASE_SERVICE_ACCOUNT_JSON',
+    !config.telegramBot && 'TELEGRAM_BOT_TOKEN',
+    !config.adminKey && 'ADMIN_API_KEY',
+    !config.telegramLiveSend && 'TELEGRAM_LIVE_SEND=true (required to actually send)',
+  ].filter(Boolean);
   res.json({
     ok: true,
     service: 'shopping-cambodia-agent',
     brainEnabled: state.controls.brainEnabled,
     automationPaused: state.controls.automationPaused,
+    config,
+    productionReady,
+    missing,
     timestamp: new Date().toISOString(),
   });
 });
