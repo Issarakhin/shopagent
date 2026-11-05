@@ -88,6 +88,7 @@ Creative behavior:
 - “Clear stock” may mention availability only when verified stock supports the claim; never invent urgency or a discount.
 - “Not like an ad” means the copy should feel native, human and editorial rather than promotional.
 - Use the exact product and campaign purpose supplied by the user. Preserve named products and explicit constraints.
+- Each product may include verified 30-day performance (sold30d, revenue30d). Read it and let it shape the angle: a product with strong real sales can lean on genuine popularity (without inventing testimonials or exact numbers), while a product with little or no recorded sales should lean on curiosity, discovery and what makes it worth a first try. Never state the raw sales numbers unless the user asks; use them only to choose the smartest angle.
 - Avoid recent openings, creative concepts, sentence rhythms, calls to action and message shapes unless repetition is strategically necessary.
 - A new draft should differ from recent campaigns in at least four meaningful ways, not by swapping a few words.
 - Khmer must sound natural for Cambodian customers and should carry the same creative idea without being a literal word-for-word translation.
@@ -202,6 +203,10 @@ export interface CampaignProductContext {
   price: number;
   stock: number;
   unit: string;
+  // Real, verified 30-day performance so the message is grounded in actual
+  // demand (not invented). Optional for backward compatibility.
+  sold30d?: number;
+  revenue30d?: number;
 }
 
 export interface RecentCampaignContext {

@@ -696,6 +696,7 @@ async function executeSkill(workflow: Workflow, step: WorkflowStep): Promise<Ski
       const requestedAudience = typeof input.targetAudience === 'string' && input.targetAudience.trim()
         ? input.targetAudience.trim()
         : 'consented Telegram subscribers in the selected segments';
+      const campaignSales = productSalesMap(30);
       const content = await draftCampaignContent({
         products: selected.map((product) => ({
           id: product.id,
@@ -705,6 +706,8 @@ async function executeSkill(workflow: Workflow, step: WorkflowStep): Promise<Ski
           price: product.price,
           stock: availableToPromise(product),
           unit: product.unit,
+          sold30d: campaignSales.get(product.id)?.quantity ?? 0,
+          revenue30d: campaignSales.get(product.id)?.revenue ?? 0,
         })),
         audience: requestedAudience,
         budget: requestedBudget,
