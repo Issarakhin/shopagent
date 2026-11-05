@@ -2,6 +2,7 @@ import { agentStore } from './store.js';
 import { calculateInventoryForecasts, calculateProductBoosts, calculateRevenueOpportunities } from './phase2-service.js';
 import { readProducts } from './business-data.js';
 import { runCambodiaMarketIntelligence, shouldRunDailyMarketScan } from './market-intelligence/daily-market-task.js';
+import { broadcastDailyMarketUpdate } from './agent-engine.js';
 
 let timer: NodeJS.Timeout | undefined;
 
@@ -34,6 +35,15 @@ export async function runHeartbeat(actor = 'system') {
       } catch (error) {
         findings.push(`Cambodia market scan failed: ${error instanceof Error ? error.message : String(error)}`);
       }
+    }
+
+    // Send the once-a-day market update to consented Telegram subscribers (opt-in
+    // via DAILY_MARKET_BROADCAST_ENABLED; self-guarded to once per Cambodia day).
+    try {
+      const broadcast = await broadcastDailyMarketUpdate(actor);
+      if (!broadcast.skipped) findings.push(`Daily market update sent to ${broadcast.sent ?? 0} Telegram subscribers.`);
+    } catch (error) {
+      findings.push(`Daily market broadcast failed: ${error instanceof Error ? error.message : String(error)}`);
     }
 
     agentStore.mutate((draft) => {

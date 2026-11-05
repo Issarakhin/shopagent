@@ -15,7 +15,7 @@ import {
 } from './business-data.js';
 import { draftCampaignContent, planWithOpenAI } from './openai-service.js';
 import { resolveCampaignProductSelection } from './product-selection.js';
-import { runCambodiaMarketIntelligence } from './market-intelligence/daily-market-task.js';
+import { cambodiaParts, runCambodiaMarketIntelligence } from './market-intelligence/daily-market-task.js';
 import {
   calculateCustomerSegments,
   calculateDynamicPricing,
@@ -1194,6 +1194,61 @@ async function publishTelegramCampaign(campaign: Campaign, approvalId: string): 
     ...(failed ? ['Some recipient sends failed.'] : []),
   ];
   return success('marketing', 'publish_approved_campaign', `Telegram campaign sent to ${sent} recipients (${skipped} skipped, ${failed} failed, ${duplicatePrevented} duplicate-prevented).`, { campaignId: campaign.id, sent, failed, skipped, duplicatePrevented, status: finalStatus, sentChatIds, skippedChatIds }, warnings);
+}
+
+// Once-a-day market update broadcast to consented Telegram subscribers. Composes
+// a short message from the day's market-intelligence picks and sends it. Opt-in
+// via DAILY_MARKET_BROADCAST_ENABLED=true so it never spams unless turned on, and
+// it respects subscriber consent + the marketing frequency cap. Guarded to run at
+// most once per Cambodia day.
+export async function broadcastDailyMarketUpdate(actor = 'system'): Promise<{ skipped: boolean; reason?: string; sent?: number; failed?: number }> {
+  if (String(process.env.DAILY_MARKET_BROADCAST_ENABLED ?? 'false').toLowerCase() !== 'true') {
+    return { skipped: true, reason: 'daily_broadcast_disabled' };
+  }
+  const todayKey = cambodiaParts().dateKey;
+  const alreadySent = agentStore.getState().auditLogs.some(
+    (log) => log.action === 'daily_market_broadcast' && log.success && (log.resultSummary ?? '').includes(todayKey),
+  );
+  if (alreadySent) return { skipped: true, reason: 'already_sent_today' };
+
+  await agentStore.refreshTelegramSubscribers().catch(() => undefined);
+  const state = agentStore.getState();
+  const recs = (state.dailyBoostRecommendations ?? []).slice(0, 3);
+  if (!recs.length) return { skipped: true, reason: 'no_recommendations' };
+
+  const lines = recs.map((item: any, index: number) => {
+    const detail = item.trendTitle || item.category || '';
+    return `${index + 1}. ${item.productName}${detail ? ` — ${detail}` : ''}`;
+  });
+  const en = `Today's picks from Shopping Cambodia:\n${lines.join('\n')}\n\nReply here to order or ask us anything.`;
+  const kh = `ជម្រើសប្រចាំថ្ងៃពី Shopping Cambodia៖\n${lines.join('\n')}\n\nឆ្លើយតបនៅទីនេះដើម្បីកម្មង់ ឬសួរយើងបាន។`;
+
+  const eligible = state.telegramSubscribers.filter((subscriber) => isSubscriberEligible(subscriber, ['all-consented']));
+  let sent = 0;
+  let failed = 0;
+  let firstError = '';
+  for (const subscriber of eligible) {
+    try {
+      const message = subscriber.language === 'km' ? kh : subscriber.language === 'en' ? en : `${kh}\n\n${en}`;
+      await sendTelegram(subscriber.chatId, message);
+      sent += 1;
+      agentStore.mutate((draft) => {
+        const target = draft.telegramSubscribers.find((item) => item.id === subscriber.id);
+        if (target) target.lastMarketingMessageAt = now();
+      });
+    } catch (error) {
+      failed += 1;
+      if (!firstError) firstError = error instanceof Error ? error.message : String(error);
+    }
+  }
+  agentStore.addAudit({
+    actor,
+    actorRole: 'system',
+    action: 'daily_market_broadcast',
+    resultSummary: `Daily market broadcast ${todayKey}: sent ${sent}, failed ${failed}${firstError ? ` (${firstError})` : ''}.`,
+    success: sent > 0,
+  });
+  return { skipped: false, sent, failed };
 }
 
 export async function createWorkflowFromCommand(command: string, actor: string): Promise<{ workflow: Workflow | null; plan: MainAgentPlan; source: string }> {

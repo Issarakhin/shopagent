@@ -6,7 +6,7 @@ import { scanCambodiaMarketTrends } from './trend-scanner.js';
 import { buildBuyerDemandSnapshots } from './demand-engine.js';
 import { buildDailyBoostRecommendations } from './opportunity-engine.js';
 
-function cambodiaParts(date = new Date()): { dateKey: string; hour: number } {
+export function cambodiaParts(date = new Date()): { dateKey: string; hour: number } {
   const parts = new Intl.DateTimeFormat('en-CA', {
     timeZone: 'Asia/Phnom_Penh',
     year: 'numeric',
