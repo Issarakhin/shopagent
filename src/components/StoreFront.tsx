@@ -30,9 +30,44 @@ export default function StoreFront({
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
   const [boosts, setBoosts] = useState<Array<{ productId: string; score: number; reason: string }>>([]);
 
+  // Inbound inquiry form state (compliant lead capture — the visitor's own
+  // message, with explicit consent for any follow-up).
+  const [inquiryText, setInquiryText] = useState('');
+  const [inquiryContact, setInquiryContact] = useState('');
+  const [inquiryConsent, setInquiryConsent] = useState(false);
+  const [inquiryStatus, setInquiryStatus] = useState<'idle' | 'sending' | 'sent' | 'error'>('idle');
+  const [inquiryMessage, setInquiryMessage] = useState('');
+
   useEffect(() => {
     void fetchPublicBoosts().then(setBoosts);
   }, []);
+
+  const handleInquirySubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!inquiryText.trim()) return;
+    setInquiryStatus('sending');
+    setInquiryMessage('');
+    const { submitInquiry } = await import('../agent-api');
+    const result = await submitInquiry({
+      inquiryText: inquiryText.trim(),
+      contactHandle: inquiryContact.trim() || undefined,
+      consentToContact: inquiryConsent,
+    });
+    if (result.ok) {
+      setInquiryStatus('sent');
+      setInquiryMessage(
+        result.qualified
+          ? 'Thank you! We found products matching your inquiry and our team will follow up.'
+          : 'Thank you! Your inquiry has been received and our team will review it.',
+      );
+      setInquiryText('');
+      setInquiryContact('');
+      setInquiryConsent(false);
+    } else {
+      setInquiryStatus('error');
+      setInquiryMessage(result.error ?? 'Could not submit your inquiry. Please try again.');
+    }
+  };
 
   const openProduct = (product: Product) => {
     setSelectedProduct(product);
@@ -483,6 +518,63 @@ export default function StoreFront({
           </div>
         </div>
       )}
+
+      {/* Customer inquiry form — compliant inbound lead capture */}
+      <section className="max-w-3xl mx-auto px-4 py-12">
+        <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6 sm:p-8">
+          <div className="flex items-center gap-3 mb-2">
+            <Icons.MessageCircle className="w-6 h-6 text-emerald-600" />
+            <h2 className="text-xl font-bold text-gray-900">Ask us about a product</h2>
+          </div>
+          <p className="text-sm text-gray-500 mb-6">
+            Looking for something specific? Tell us what you need and our team will help. / សួរយើងអំពីផលិតផល — ប្រាប់យើងពីអ្វីដែលអ្នកត្រូវការ។
+          </p>
+          {inquiryStatus === 'sent' ? (
+            <div className="rounded-lg bg-emerald-50 border border-emerald-200 p-4 text-emerald-800 text-sm">
+              {inquiryMessage}
+            </div>
+          ) : (
+            <form onSubmit={handleInquirySubmit} className="space-y-4">
+              <textarea
+                value={inquiryText}
+                onChange={(e) => setInquiryText(e.target.value)}
+                required
+                maxLength={2000}
+                rows={3}
+                placeholder="e.g. Do you have fresh fish available for delivery in Phnom Penh?"
+                className="w-full rounded-lg border border-gray-300 px-4 py-3 text-sm focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500"
+              />
+              <input
+                type="text"
+                value={inquiryContact}
+                onChange={(e) => setInquiryContact(e.target.value)}
+                placeholder="How can we reach you? (email, phone, or Telegram — optional)"
+                className="w-full rounded-lg border border-gray-300 px-4 py-3 text-sm focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500"
+              />
+              <label className="flex items-start gap-2 text-xs text-gray-600">
+                <input
+                  type="checkbox"
+                  checked={inquiryConsent}
+                  onChange={(e) => setInquiryConsent(e.target.checked)}
+                  className="mt-0.5"
+                />
+                <span>I agree to be contacted about this inquiry. You can opt out at any time. / ខ្ញុំយល់ព្រមឱ្យទាក់ទងមកវិញ។</span>
+              </label>
+              {inquiryStatus === 'error' && (
+                <div className="text-sm text-red-600">{inquiryMessage}</div>
+              )}
+              <button
+                type="submit"
+                disabled={inquiryStatus === 'sending' || !inquiryText.trim()}
+                className="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-5 py-2.5 text-white text-sm font-medium hover:bg-emerald-700 disabled:opacity-50"
+              >
+                <Icons.Send className="w-4 h-4" />
+                {inquiryStatus === 'sending' ? 'Sending…' : 'Send inquiry'}
+              </button>
+            </form>
+          )}
+        </div>
+      </section>
     </div>
   );
 }

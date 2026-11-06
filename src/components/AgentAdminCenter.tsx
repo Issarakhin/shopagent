@@ -46,7 +46,7 @@ interface Props {
   onShowNotification: (message: string, type: 'success' | 'error' | 'warning') => void;
 }
 
-type Tab = 'main' | 'skills' | 'workflows' | 'approvals' | 'campaigns' | 'system' | 'phase2' | 'market' | 'history';
+type Tab = 'main' | 'skills' | 'workflows' | 'approvals' | 'campaigns' | 'discovery' | 'system' | 'phase2' | 'market' | 'history';
 
 const tabItems: Array<{ id: Tab; label: string; icon: React.ComponentType<{ className?: string }> }> = [
   { id: 'main', label: 'Main Agent', icon: Bot },
@@ -54,6 +54,7 @@ const tabItems: Array<{ id: Tab; label: string; icon: React.ComponentType<{ clas
   { id: 'workflows', label: 'Workflows', icon: Workflow },
   { id: 'approvals', label: 'Approvals', icon: ShieldCheck },
   { id: 'campaigns', label: 'Campaigns', icon: Megaphone },
+  { id: 'discovery', label: 'Customer Discovery', icon: Users },
   { id: 'system', label: 'Brain & Heartbeat', icon: HeartPulse },
   { id: 'phase2', label: 'Phase 2 Intelligence', icon: Rocket },
   { id: 'market', label: 'Cambodia Market', icon: Globe2 },
@@ -314,6 +315,81 @@ export default function AgentAdminCenter({ products, onShowNotification }: Props
 
       {editingCampaign && (
         <CampaignEditor campaign={editingCampaign} onClose={() => setEditingCampaign(null)} onChange={setEditingCampaign} onSave={async () => { await doAction(`campaign-${editingCampaign.id}`, () => agentApi.updateCampaign(editingCampaign.id, { name: editingCampaign.name, objective: editingCampaign.objective, campaignPurpose: editingCampaign.campaignPurpose, targetAudience: editingCampaign.targetAudience, tone: editingCampaign.tone, contentStyle: editingCampaign.contentStyle, contentShape: editingCampaign.contentShape, desiredReaction: editingCampaign.desiredReaction, creativeAngle: editingCampaign.creativeAngle, creativeRationale: editingCampaign.creativeRationale, callToAction: editingCampaign.callToAction, telegramMessageKh: editingCampaign.telegramMessageKh, telegramMessageEn: editingCampaign.telegramMessageEn, segmentIds: editingCampaign.segmentIds, budget: editingCampaign.budget }), 'Campaign saved as a new review version.'); setEditingCampaign(null); }} />
+      )}
+
+      {activeTab === 'discovery' && (
+        <div className="space-y-4">
+          <Card>
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="font-bold text-gray-900">Customer Discovery &amp; Outreach</h3>
+                <p className="mt-1 text-xs text-gray-500">Leads captured from genuine inbound inquiries, qualified against the live catalogue. Phnom Penh location is only ever marked <strong>confirmed</strong> when a lead states it explicitly. Outreach is draft-only and requires approval; a lead with no consent cannot be contacted.</p>
+              </div>
+            </div>
+            <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
+              {(() => {
+                const leads = state.leads ?? [];
+                const tiles: Array<[string, number]> = [
+                  ['Total leads', leads.length],
+                  ['Qualified', leads.filter((l) => l.qualification === 'qualified').length],
+                  ['Consented', leads.filter((l) => l.consentToContact).length],
+                  ['Converted', leads.filter((l) => l.qualification === 'converted').length],
+                ];
+                return tiles.map(([label, value]) => (
+                  <div key={label} className="rounded-xl bg-gray-50 p-3"><div className="text-lg font-bold text-gray-900">{value}</div><div className="text-[10px] uppercase tracking-wide text-gray-400">{label}</div></div>
+                ));
+              })()}
+            </div>
+          </Card>
+          {(state.leads ?? []).length === 0 ? (
+            <Card><Empty text="No leads yet. Leads arrive from the storefront inquiry form, the Telegram bot, or referrals." /></Card>
+          ) : (
+            (state.leads ?? []).map((lead) => {
+              const interestNames = lead.productInterestIds
+                .map((id) => products.find((p) => p.id === id)?.name)
+                .filter(Boolean) as string[];
+              return (
+                <Card key={lead.id}>
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Badge status={lead.qualification} />
+                        <span className="rounded-full bg-gray-100 px-2 py-0.5 text-[10px] font-semibold text-gray-600">{lead.source.replaceAll('_', ' ')}</span>
+                        <span className="rounded-full bg-gray-100 px-2 py-0.5 text-[10px] font-semibold text-gray-600">{lead.language}</span>
+                        {lead.locationConfirmed
+                          ? <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold text-emerald-700">Phnom Penh confirmed</span>
+                          : <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-700">Location inferred</span>}
+                        {lead.consentToContact
+                          ? <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold text-emerald-700">Consented</span>
+                          : <span className="rounded-full bg-red-100 px-2 py-0.5 text-[10px] font-semibold text-red-700">No consent</span>}
+                      </div>
+                      <p className="mt-2 whitespace-pre-wrap text-sm text-gray-800">{lead.inquiryText}</p>
+                      <p className="mt-1 text-[11px] text-gray-400">{lead.locationBasis}</p>
+                      {lead.contactHandle && <p className="mt-1 text-[11px] text-gray-500">Contact: {lead.contactHandle}</p>}
+                      {lead.sourceUrl && <a href={lead.sourceUrl} target="_blank" rel="noreferrer" className="mt-1 inline-flex items-center gap-1 text-[11px] font-semibold text-blue-600 hover:underline">Source <ExternalLink className="h-3 w-3" /></a>}
+                    </div>
+                  </div>
+                  <div className="mt-3 rounded-xl border border-cyan-100 bg-cyan-50 p-3">
+                    <p className="text-[10px] font-bold uppercase text-cyan-700">Qualification</p>
+                    <p className="mt-1 text-xs text-cyan-950">{lead.qualificationReason}</p>
+                    {interestNames.length > 0 && <p className="mt-1 text-[11px] text-cyan-800">Catalogue interest: {interestNames.join(', ')}</p>}
+                  </div>
+                  <div className="mt-3 flex flex-wrap items-center gap-2">
+                    <button
+                      onClick={() => { setCommand(`Draft personalized outreach for lead ${lead.id}.`); setActiveTab('main'); }}
+                      disabled={!lead.consentToContact}
+                      title={lead.consentToContact ? 'Prepare a draft reply (needs approval before sending)' : 'This lead has not consented to contact'}
+                      className="rounded-lg bg-gray-900 px-3 py-2 text-xs font-semibold text-white disabled:opacity-40"
+                    >
+                      Draft outreach
+                    </button>
+                    <span className="text-[11px] text-gray-400">Captured {new Date(lead.createdAt).toLocaleString()}</span>
+                  </div>
+                </Card>
+              );
+            })
+          )}
+        </div>
       )}
 
       {activeTab === 'system' && (

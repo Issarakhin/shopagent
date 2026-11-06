@@ -210,5 +210,25 @@ export interface AgentState {
   marketIntelligenceRuns: MarketIntelligenceRun[];
   marketTrends: MarketTrendSignal[];
   dailyBoostRecommendations: DailyBoostRecommendation[];
+  leads: Lead[];
+}
+
+export interface Lead {
+  id: string;
+  source: 'telegram' | 'web_inquiry' | 'referral' | 'manual' | 'social_public';
+  sourceUrl?: string;
+  inquiryText: string;
+  language: 'km' | 'en' | 'both';
+  productInterestIds: string[];
+  locationConfirmed: boolean;
+  locationBasis: string;
+  consentToContact: boolean;
+  qualification: 'new' | 'qualified' | 'unqualified' | 'contacted' | 'converted';
+  qualificationReason: string;
+  contactHandle?: string;
+  interactions: Array<{ at: string; type: string; note: string }>;
+  workflowId?: string;
+  createdAt: string;
+  updatedAt: string;
 }
 

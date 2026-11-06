@@ -619,42 +619,10 @@ async function executeSkill(workflow: Workflow, step: WorkflowStep): Promise<Ski
     case 'sales:qualify_customer_lead': {
       const inquiry = String(input.inquiryText ?? input.requestText ?? input.userRequest ?? '').trim();
       if (!inquiry) return fail(step.skill, step.action, 'MISSING_INQUIRY', 'An inquiry text is required to qualify a lead.');
-      const products = readProducts();
-      const matched = matchProductsToText(inquiry, products);
-      const lang = detectLeadLanguage(inquiry);
-      // Phnom Penh relevance: CONFIRMED only when the caller passes an explicit
-      // confirmedLocation; a Khmer word or hashtag is merely inferred, never proof.
-      const confirmed = input.confirmedLocation === true || /phnom\s*penh|ភ្នំពេញ/i.test(String(input.location ?? ''));
-      const inferred = /ភ្នំពេញ|phnom\s*penh|#?khmer|កម្ពុជា|cambodia/i.test(inquiry);
-      const locationBasis = confirmed
-        ? 'Confirmed from an explicit location the lead provided.'
-        : inferred
-          ? 'Inferred only (Khmer/Cambodia signal in the text) — not confirmed.'
-          : 'No location signal.';
-      const consent = input.consentToContact === true;
-      const qualified = matched.length > 0;
-      const lead = {
-        id: id('lead'),
-        source: (['telegram', 'web_inquiry', 'referral', 'manual', 'social_public'] as const).includes(input.source as any) ? input.source as any : 'manual',
-        sourceUrl: typeof input.sourceUrl === 'string' ? input.sourceUrl : undefined,
-        inquiryText: inquiry.slice(0, 1000),
-        language: lang,
-        productInterestIds: matched.map((p) => p.id),
-        locationConfirmed: confirmed,
-        locationBasis,
-        consentToContact: consent,
-        qualification: (qualified ? 'qualified' : 'unqualified') as 'qualified' | 'unqualified',
-        qualificationReason: qualified
-          ? `Matches ${matched.map((p) => p.name).join(', ')} in the live catalogue.${confirmed ? ' Location confirmed in Phnom Penh.' : ''}`
-          : 'No in-catalogue product matched this inquiry.',
-        contactHandle: typeof input.contactHandle === 'string' ? input.contactHandle : undefined,
-        interactions: [{ at: now(), type: 'captured', note: 'Lead captured from a permitted source.' }],
-        workflowId: workflow.id,
-        createdAt: now(),
-        updatedAt: now(),
-      };
-      agentStore.mutate((draft) => { draft.leads.unshift(lead); });
-      return success(step.skill, step.action, `Lead ${lead.qualification} (${matched.length} product match${matched.length === 1 ? '' : 'es'}).`, { lead, matchedProducts: matched.map((p) => ({ id: p.id, name: p.name })) }, confirmed ? [] : ['Phnom Penh location is inferred, not confirmed.']);
+      const { lead, matched, deduped } = captureAndQualifyLead(input, workflow.id);
+      const notes = lead.locationConfirmed ? [] : ['Phnom Penh location is inferred, not confirmed.'];
+      if (deduped) notes.push('An existing lead from the same contact was updated instead of creating a duplicate.');
+      return success(step.skill, step.action, `Lead ${lead.qualification} (${matched.length} product match${matched.length === 1 ? '' : 'es'}).`, { lead, matchedProducts: matched.map((p) => ({ id: p.id, name: p.name })) }, notes);
     }
 
     case 'sales:draft_lead_outreach': {
@@ -1156,6 +1124,87 @@ function detectLeadLanguage(text: string): 'km' | 'en' | 'both' {
   const hasKhmer = /[ក-៿]/.test(text);
   const hasLatin = /[a-z]/i.test(text);
   return hasKhmer && hasLatin ? 'both' : hasKhmer ? 'km' : 'en';
+}
+
+// Capture + qualify an inbound lead against the LIVE catalogue. Shared by the
+// sales.qualify_customer_lead workflow action and the public inquiry endpoint,
+// so both paths dedup, respect consent, and never fabricate product interest.
+export function captureAndQualifyLead(
+  input: Record<string, any>,
+  workflowId?: string,
+): { lead: import('./types.js').Lead; matched: ReturnType<typeof readProducts>; deduped: boolean } {
+  const inquiry = String(input.inquiryText ?? input.requestText ?? input.userRequest ?? '').trim();
+  const products = readProducts();
+  const matched = matchProductsToText(inquiry, products);
+  const lang = detectLeadLanguage(inquiry);
+  // CONFIRMED only when an explicit location is supplied; a Khmer word or
+  // hashtag in free text is merely inferred, never proof of being in Phnom Penh.
+  const confirmed = input.confirmedLocation === true || /phnom\s*penh|ភ្នំពេញ/i.test(String(input.location ?? ''));
+  const inferred = /ភ្នំពេញ|phnom\s*penh|#?khmer|កម្ពុជា|cambodia/i.test(inquiry);
+  const locationBasis = confirmed
+    ? 'Confirmed from an explicit location the lead provided.'
+    : inferred
+      ? 'Inferred only (Khmer/Cambodia signal in the text) — not confirmed.'
+      : 'No location signal.';
+  const consent = input.consentToContact === true;
+  const qualified = matched.length > 0;
+  const contactHandle = typeof input.contactHandle === 'string' && input.contactHandle.trim() ? input.contactHandle.trim() : undefined;
+  const source = (['telegram', 'web_inquiry', 'referral', 'manual', 'social_public'] as const).includes(input.source as any)
+    ? (input.source as import('./types.js').Lead['source'])
+    : 'manual';
+
+  // Dedup: if we already hold a lead with the same contact handle, update it
+  // rather than pile up duplicates from repeat inquiries.
+  const existing = contactHandle
+    ? agentStore.getState().leads.find((l) => l.contactHandle && l.contactHandle.toLowerCase() === contactHandle.toLowerCase())
+    : undefined;
+
+  const qualificationReason = qualified
+    ? `Matches ${matched.map((p) => p.name).join(', ')} in the live catalogue.${confirmed ? ' Location confirmed in Phnom Penh.' : ''}`
+    : 'No in-catalogue product matched this inquiry.';
+
+  let result: import('./types.js').Lead;
+  if (existing) {
+    agentStore.mutate((draft) => {
+      const lead = draft.leads.find((l) => l.id === existing.id)!;
+      lead.inquiryText = inquiry.slice(0, 1000);
+      lead.language = lang;
+      lead.productInterestIds = matched.map((p) => p.id);
+      lead.locationConfirmed = lead.locationConfirmed || confirmed;
+      lead.locationBasis = confirmed ? locationBasis : lead.locationBasis;
+      lead.consentToContact = consent || lead.consentToContact;
+      if (lead.qualification !== 'converted' && lead.qualification !== 'contacted') {
+        lead.qualification = qualified ? 'qualified' : 'unqualified';
+        lead.qualificationReason = qualificationReason;
+      }
+      if (input.sourceUrl && typeof input.sourceUrl === 'string') lead.sourceUrl = input.sourceUrl;
+      lead.interactions.unshift({ at: now(), type: 'inquiry', note: 'Repeat inquiry from the same contact.' });
+      lead.updatedAt = now();
+      result = { ...lead };
+    });
+    return { lead: result!, matched, deduped: true };
+  }
+
+  const lead: import('./types.js').Lead = {
+    id: id('lead'),
+    source,
+    sourceUrl: typeof input.sourceUrl === 'string' ? input.sourceUrl : undefined,
+    inquiryText: inquiry.slice(0, 1000),
+    language: lang,
+    productInterestIds: matched.map((p) => p.id),
+    locationConfirmed: confirmed,
+    locationBasis,
+    consentToContact: consent,
+    qualification: qualified ? 'qualified' : 'unqualified',
+    qualificationReason,
+    contactHandle,
+    interactions: [{ at: now(), type: 'captured', note: 'Lead captured from a permitted source.' }],
+    workflowId,
+    createdAt: now(),
+    updatedAt: now(),
+  };
+  agentStore.mutate((draft) => { draft.leads.unshift(lead); });
+  return { lead, matched, deduped: false };
 }
 
 function isSubscriberEligible(subscriber: import('./types.js').TelegramSubscriber, segmentIds: string[]): boolean {

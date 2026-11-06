@@ -1,6 +1,7 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import { agentStore } from './store.js';
 import {
+  captureAndQualifyLead,
   createBoostApproval,
   createWorkflowFromCommand,
   decideApproval,
@@ -109,6 +110,48 @@ agentRouter.post('/events', (req, res) => {
     draft.events = draft.events.slice(0, 20_000);
   });
   res.status(201).json({ ok: true, eventId: event.id });
+});
+
+// --- Public customer inquiry capture -------------------------------------
+// A real person submits an inquiry from the storefront (or a bot relays one).
+// This is the ONLY compliant way leads enter the system: a genuine inbound
+// message with the sender's own consent. We never harvest or fabricate.
+const inquiryRateWindowMs = 60_000;
+const inquiryRateMax = Number(process.env.INQUIRY_RATE_MAX ?? 5);
+const inquiryHits = new Map<string, number[]>();
+function inquiryRateLimited(key: string): boolean {
+  const nowMs = Date.now();
+  const hits = (inquiryHits.get(key) ?? []).filter((t) => nowMs - t < inquiryRateWindowMs);
+  hits.push(nowMs);
+  inquiryHits.set(key, hits);
+  if (inquiryHits.size > 5_000) inquiryHits.clear(); // bound memory
+  return hits.length > inquiryRateMax;
+}
+
+agentRouter.post('/inquiries', (req, res) => {
+  const ip = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown').split(',')[0].trim();
+  if (inquiryRateLimited(ip)) return res.status(429).json({ error: 'Too many inquiries. Please try again shortly.' });
+  const inquiryText = String(req.body?.inquiryText ?? req.body?.message ?? '').trim();
+  if (!inquiryText) return res.status(400).json({ error: 'An inquiry message is required.' });
+  if (inquiryText.length > 2_000) return res.status(400).json({ error: 'Inquiry message is too long.' });
+  // Consent is explicit and required for any future contact; without it the lead
+  // is still captured for the merchant to see, but marked non-contactable.
+  const lead = captureAndQualifyLead({
+    inquiryText,
+    source: 'web_inquiry',
+    contactHandle: typeof req.body?.contactHandle === 'string' ? req.body.contactHandle : undefined,
+    location: typeof req.body?.location === 'string' ? req.body.location : undefined,
+    confirmedLocation: req.body?.confirmedLocation === true,
+    consentToContact: req.body?.consentToContact === true,
+    sourceUrl: typeof req.body?.sourceUrl === 'string' ? req.body.sourceUrl : undefined,
+  }).lead;
+  // Only echo back safe, non-sensitive fields to the public caller.
+  res.status(201).json({
+    ok: true,
+    leadId: lead.id,
+    qualified: lead.qualification === 'qualified',
+    matchedProductIds: lead.productInterestIds,
+  });
 });
 
 agentRouter.use('/admin', adminAuth);

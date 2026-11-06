@@ -44,7 +44,30 @@ export const agentApi = {
   revenueOpportunities: () => request('/admin/phase2/revenue-opportunities', { method: 'POST' }),
   addSubscriber: (subscriber: Record<string, unknown>) => request('/admin/telegram-subscribers', { method: 'POST', body: JSON.stringify(subscriber) }),
   scanMarketIntelligence: (requestText?: string) => request('/admin/market-intelligence/scan', { method: 'POST', body: JSON.stringify({ request: requestText, force: true }) }),
+  leads: () => request<any[]>('/admin/leads'),
 };
+
+// Public, unauthenticated: a storefront visitor submits their own inquiry with
+// explicit consent. The backend qualifies it against the live catalogue.
+export async function submitInquiry(payload: {
+  inquiryText: string;
+  contactHandle?: string;
+  location?: string;
+  consentToContact: boolean;
+}): Promise<{ ok: boolean; leadId?: string; qualified?: boolean; matchedProductIds?: string[]; error?: string }> {
+  try {
+    const response = await fetch(`${API_BASE}/api/agent/inquiries`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...payload, sourceUrl: typeof window !== 'undefined' ? window.location.href : undefined }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) return { ok: false, error: data.error ?? `Request failed (${response.status}).` };
+    return data;
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : 'Network error.' };
+  }
+}
 
 export async function trackStoreEvent(event: Record<string, unknown>) {
   try {
