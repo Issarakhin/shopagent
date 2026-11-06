@@ -20,7 +20,19 @@ service cloud.firestore {
     // Users collection
     match /users/{uid} {
       allow read: if isAuthenticated();
-      allow write: if isAuthenticated() && (request.auth.uid == uid || isAdmin());
+      // A user may create/update their OWN profile but must NOT grant themselves
+      // an elevated role: the role must be absent or stay 'buyer' unless an admin
+      // is making the change. Admins may set any role.
+      allow create: if isAuthenticated() && request.auth.uid == uid
+        && (!('role' in request.resource.data) || request.resource.data.role == 'buyer');
+      allow update: if isAuthenticated() && (
+        isAdmin() ||
+        (request.auth.uid == uid
+          && (!('role' in request.resource.data)
+              || request.resource.data.role == resource.data.role
+              || request.resource.data.role == 'buyer'))
+      );
+      allow delete: if isAdmin();
     }
 
     // Products collection

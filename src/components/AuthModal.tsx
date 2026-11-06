@@ -36,7 +36,6 @@ export default function AuthModal({
   const [name, setName] = useState('');
   const [phone, setPhone] = useState('');
   const [address, setAddress] = useState('');
-  const [role, setRole] = useState<'buyer' | 'admin'>('buyer');
 
   // Edit Profile State
   const [editName, setEditName] = useState(userProfile?.displayName || '');
@@ -75,18 +74,20 @@ export default function AuthModal({
         // Set Auth Display Name
         await updateProfile(user, { displayName: name });
 
-        // Save User document in Firestore
+        // Save User document in Firestore. Public signup is ALWAYS a buyer —
+        // admin privileges are never self-assigned (Firestore rules also enforce
+        // this). An existing admin provisions elevated roles out of band.
         await setDoc(doc(db, 'users', user.uid), {
           uid: user.uid,
           email: user.email,
           displayName: name,
-          role: role,
+          role: 'buyer',
           phone: phone || '',
           address: address || '',
           createdAt: new Date().toISOString()
         });
 
-        onShowNotification(`Account created successfully as ${role === 'admin' ? 'Admin' : 'Buyer'}!`, 'success');
+        onShowNotification('Account created successfully!', 'success');
         await onRefreshProfile();
         onClose();
       }
@@ -364,25 +365,6 @@ export default function AuthModal({
                             placeholder="555-0192"
                             className="block w-full pl-9 pr-3 py-2.5 bg-gray-50 border border-gray-200 text-xs rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:bg-white text-gray-900"
                           />
-                        </div>
-                      </div>
-
-                      <div>
-                        <label className="block text-xs font-mono font-semibold text-gray-500 uppercase mb-1.5">
-                          Account Type *
-                        </label>
-                        <div className="relative rounded-lg shadow-2xs">
-                          <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-gray-400">
-                            <Shield className="w-4 h-4" />
-                          </div>
-                          <select
-                            value={role}
-                            onChange={(e) => setRole(e.target.value as 'buyer' | 'admin')}
-                            className="block w-full pl-9 pr-3 py-2.5 bg-gray-50 border border-gray-200 text-xs rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:bg-white text-gray-900 font-sans"
-                          >
-                            <option value="buyer">Buyer (Customer)</option>
-                            <option value="admin">Admin (Manager)</option>
-                          </select>
                         </div>
                       </div>
                     </div>

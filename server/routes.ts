@@ -86,16 +86,21 @@ agentRouter.get('/public/boosts', (_req, res) => {
 });
 
 agentRouter.post('/events', (req, res) => {
-  const allowed = ['product_view', 'add_to_cart', 'purchase', 'search', 'checkout_started'];
-  if (!allowed.includes(req.body?.type)) return res.status(400).json({ error: 'Invalid event type.' });
+  // Public endpoint: accept only untrusted BROWSING signals. Verified purchases
+  // and revenue must come from real orders (business-data), never from a value a
+  // client can POST — otherwise anyone could inflate analytics and skew pricing.
+  const allowed = ['product_view', 'add_to_cart', 'search', 'checkout_started'];
+  if (!allowed.includes(req.body?.type)) return res.status(400).json({ error: 'Invalid or non-public event type.' });
   const event: StoreEvent = {
     id: `event_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
     type: req.body.type,
     productId: typeof req.body.productId === 'string' ? req.body.productId : undefined,
     userId: typeof req.body.userId === 'string' ? req.body.userId : undefined,
     sessionId: typeof req.body.sessionId === 'string' ? req.body.sessionId : undefined,
-    quantity: Number.isFinite(Number(req.body.quantity)) ? Number(req.body.quantity) : undefined,
-    value: Number.isFinite(Number(req.body.value)) ? Number(req.body.value) : undefined,
+    quantity: Number.isFinite(Number(req.body.quantity)) ? Math.max(0, Math.min(10_000, Number(req.body.quantity))) : undefined,
+    // Deliberately drop client-supplied monetary value: revenue is derived from
+    // verified orders only, never from browsing events.
+    value: undefined,
     metadata: req.body.metadata && typeof req.body.metadata === 'object' ? req.body.metadata : undefined,
     createdAt: new Date().toISOString(),
   };

@@ -342,10 +342,30 @@ app.post('/api/orders', (req, res) => {
   };
 
   orders.push(newOrder);
-  
+
   // Commit changes to disk
   writeProducts(products);
   writeOrders(orders);
+
+  // Emit server-VERIFIED purchase events (one per line) from the real order, so
+  // demand/analytics signals are grounded in actual orders — not client-posted
+  // events, which the public /events endpoint no longer accepts.
+  try {
+    agentStore.mutate((draft) => {
+      for (const line of orderItems) {
+        draft.events.unshift({
+          id: `event_purchase_${newOrder.id}_${line.productId}`,
+          type: 'purchase',
+          productId: line.productId,
+          quantity: line.quantity,
+          value: Number((line.price * line.quantity).toFixed(2)),
+          metadata: { orderId: newOrder.id, verified: true },
+          createdAt: newOrder.createdAt,
+        });
+      }
+      draft.events = draft.events.slice(0, 20_000);
+    });
+  } catch { /* analytics must never block an order */ }
 
   res.status(201).json(newOrder);
 });
@@ -506,6 +526,15 @@ app.get('/api/stats', (req, res) => {
 // SYSTEM RESET API
 // ==========================================
 app.post('/api/reset', (req, res) => {
+  // Destructive: wipes products/categories/orders. Never allow in production, and
+  // require the admin key elsewhere so it can't be triggered anonymously.
+  if (process.env.NODE_ENV === 'production') {
+    return res.status(403).json({ error: 'Database reset is disabled in production.' });
+  }
+  const expected = process.env.ADMIN_API_KEY;
+  if (expected && req.header('x-admin-key') !== expected) {
+    return res.status(401).json({ error: 'Unauthorized reset request.' });
+  }
   fs.writeFileSync(PRODUCTS_FILE, JSON.stringify(INITIAL_PRODUCTS, null, 2));
   fs.writeFileSync(CATEGORIES_FILE, JSON.stringify(INITIAL_CATEGORIES, null, 2));
   fs.writeFileSync(ORDERS_FILE, JSON.stringify([], null, 2));
