@@ -222,7 +222,7 @@ export default function Cart({
                       <div>
                         <h4 className="text-emerald-900 font-semibold text-xs">Secure Order Managed</h4>
                         <p className="text-emerald-700 text-[11px] leading-relaxed mt-0.5">
-                          A confirmation email has been dispatched to {placedOrder.customerEmail}. Track delivery status in the Admin Panel.
+                          Your order for {placedOrder.customerEmail} has been recorded. Track its status in the Admin Panel.
                         </p>
                       </div>
                     </div>
