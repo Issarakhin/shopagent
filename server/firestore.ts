@@ -138,6 +138,28 @@ export async function fetchTelegramSubscribers(): Promise<TelegramSubscriber[]> 
   }
 }
 
+// Verify a Firebase ID token and resolve the caller's role from their own
+// users/{uid} document — the ONLY trustworthy source of a role. This replaces
+// trusting a client-sent x-admin-role header (which anyone could forge). Returns
+// null when the token is missing/invalid or Firebase admin is not configured.
+export async function verifyAdminIdentity(
+  idToken: string,
+): Promise<{ uid: string; email?: string; role: string } | null> {
+  if (!db || !idToken) return null;
+  try {
+    const decoded = await admin.auth().verifyIdToken(idToken);
+    const uid = decoded.uid;
+    const snapshot = await db.collection('users').doc(uid).get();
+    const data = snapshot.exists ? snapshot.data() : undefined;
+    // Default to the lowest-privilege role if none is recorded.
+    const role = typeof data?.role === 'string' && data.role ? data.role : 'buyer';
+    return { uid, email: decoded.email, role };
+  } catch (error) {
+    console.error('Failed to verify Firebase ID token for admin request:', error);
+    return null;
+  }
+}
+
 // Read a whole collection (products, categories, orders) written by the
 // storefront/admin so the backend agent operates on the real inventory.
 export async function fetchFirestoreCollection<T>(name: string): Promise<T[] | null> {

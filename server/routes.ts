@@ -20,18 +20,49 @@ import {
 } from './phase2-service.js';
 import type { SkillId, StoreEvent, TelegramSubscriber } from './types.js';
 import { latestMarketIntelligence, runCambodiaMarketIntelligence } from './market-intelligence/daily-market-task.js';
+import { verifyAdminIdentity } from './firestore.js';
 
 export const agentRouter = Router();
 
+// When ADMIN_AUTH_MODE=firebase, the caller's identity and role come from a
+// verified Firebase ID token (see verifyAdminIdentity), and the x-admin-role /
+// x-admin-user headers are IGNORED — they can no longer be forged to escalate.
+const firebaseAuthMode = () => process.env.ADMIN_AUTH_MODE === 'firebase';
+
+// The verified identity is stashed here per request once adminAuth runs.
+function verifiedIdentity(req: Request): { uid: string; email?: string; role: string } | undefined {
+  return (req as any).adminIdentity;
+}
+
 function actorFrom(req: Request) {
+  const identity = verifiedIdentity(req);
+  if (firebaseAuthMode()) return identity?.email ?? identity?.uid ?? 'unknown';
   return String(req.header('x-admin-user') || 'admin');
 }
 
 function roleFrom(req: Request) {
+  const identity = verifiedIdentity(req);
+  // In firebase mode the ONLY source of truth is the verified token's user doc.
+  if (firebaseAuthMode()) return identity?.role ?? 'buyer';
   return String(req.header('x-admin-role') || 'admin');
 }
 
 function adminAuth(req: Request, res: Response, next: NextFunction) {
+  if (firebaseAuthMode()) {
+    const header = req.header('authorization') || req.header('Authorization') || '';
+    const token = header.startsWith('Bearer ') ? header.slice(7).trim() : '';
+    if (!token) return res.status(401).json({ error: 'A Firebase ID token is required (Authorization: Bearer <token>).' });
+    verifyAdminIdentity(token)
+      .then((identity) => {
+        if (!identity) return res.status(401).json({ error: 'Invalid or expired admin credentials.' });
+        (req as any).adminIdentity = identity;
+        next();
+      })
+      .catch(() => res.status(401).json({ error: 'Invalid or expired admin credentials.' }));
+    return;
+  }
+  // Legacy shared-key mode (kept for backward compatibility until the deployment
+  // flips ADMIN_AUTH_MODE=firebase). Still requires the server-side key.
   const expected = process.env.ADMIN_API_KEY;
   if (!expected && process.env.NODE_ENV !== 'production') return next();
   if (!expected) return res.status(503).json({ error: 'ADMIN_API_KEY is not configured.' });

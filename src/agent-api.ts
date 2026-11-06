@@ -9,11 +9,27 @@ const ADMIN_ROLE = import.meta.env.VITE_ADMIN_ROLE ?? 'owner';
 // the same origin. Trailing slashes are trimmed so paths join cleanly.
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/$/, '');
 
+// When the backend runs in Firebase auth mode it verifies a real ID token and
+// derives the role from the user's own Firestore record, so the legacy
+// x-admin-* headers are ignored. We send the current user's ID token whenever
+// one is available; the shared-key headers remain only for legacy backends.
+async function currentIdToken(): Promise<string | null> {
+  try {
+    const { auth } = await import('./firebase');
+    const user = auth.currentUser;
+    return user ? await user.getIdToken() : null;
+  } catch {
+    return null;
+  }
+}
+
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+  const idToken = await currentIdToken();
   const response = await fetch(`${API_BASE}/api/agent${path}`, {
     ...options,
     headers: {
       'Content-Type': 'application/json',
+      ...(idToken ? { Authorization: `Bearer ${idToken}` } : {}),
       'x-admin-key': ADMIN_KEY,
       'x-admin-user': ADMIN_USER,
       'x-admin-role': ADMIN_ROLE,

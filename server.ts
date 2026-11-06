@@ -352,6 +352,10 @@ app.post('/api/orders', (req, res) => {
   // demand/analytics signals are grounded in actual orders — not client-posted
   // events, which the public /events endpoint no longer accepts.
   try {
+    const contactCandidates = [customerEmail, customerPhone]
+      .filter((v): v is string => typeof v === 'string' && v.trim().length > 0)
+      .map((v) => v.trim().toLowerCase());
+    const orderedProductIds = orderItems.map((line) => line.productId);
     agentStore.mutate((draft) => {
       for (const line of orderItems) {
         draft.events.unshift({
@@ -365,6 +369,34 @@ app.post('/api/orders', (req, res) => {
         });
       }
       draft.events = draft.events.slice(0, 20_000);
+
+      // Lead conversion tracking: a VERIFIED order closes the loop. Match a lead
+      // by its contact handle (email/phone the buyer gave), or, failing that, by
+      // a consented lead whose catalogue interest the order fulfils. We only ever
+      // mark 'converted' from a real order, never from a guess.
+      if (Array.isArray(draft.leads) && draft.leads.length > 0) {
+        const byContact = contactCandidates.length
+          ? draft.leads.find((lead) =>
+              lead.contactHandle && contactCandidates.includes(lead.contactHandle.trim().toLowerCase()))
+          : undefined;
+        const byInterest = !byContact
+          ? draft.leads.find((lead) =>
+              lead.qualification !== 'converted' &&
+              lead.consentToContact &&
+              lead.productInterestIds.some((id) => orderedProductIds.includes(id)))
+          : undefined;
+        const lead = byContact ?? byInterest;
+        if (lead && lead.qualification !== 'converted') {
+          lead.qualification = 'converted';
+          lead.qualificationReason = `Converted: order ${newOrder.id} was placed for a matching product.`;
+          lead.interactions.unshift({
+            at: newOrder.createdAt,
+            type: 'converted',
+            note: `Verified order ${newOrder.id} ($${newOrder.totalAmount.toFixed(2)}) ${byContact ? 'matched this lead\'s contact' : 'fulfilled this lead\'s product interest'}.`,
+          });
+          lead.updatedAt = newOrder.createdAt;
+        }
+      }
     });
   } catch { /* analytics must never block an order */ }
 
