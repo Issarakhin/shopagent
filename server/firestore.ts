@@ -71,6 +71,7 @@ function trimStateForFirestore(state: AgentState): AgentState {
     shipments: cap(state.shipments, 300),
     deliveryExceptions: cap(state.deliveryExceptions, 300),
     leads: cap(state.leads, 1000),
+    planningJobs: cap(state.planningJobs, 200),
   };
 }
 

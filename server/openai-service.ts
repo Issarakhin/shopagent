@@ -6,34 +6,85 @@ const SKILLS: SkillId[] = [
   'business-planning', 'marketing', 'sales', 'inventory', 'finance', 'support', 'analytics', 'logistics',
 ];
 
+// A structured error for OpenAI failures so callers (and the HTTP layer) can
+// react to the specific cause instead of a generic message.
+export class OpenAIError extends Error {
+  code: 'OPENAI_TIMEOUT' | 'OPENAI_RATE_LIMITED' | 'OPENAI_NETWORK' | 'OPENAI_BAD_RESPONSE';
+  status?: number;
+  constructor(code: OpenAIError['code'], message: string, status?: number) {
+    super(message);
+    this.name = 'OpenAIError';
+    this.code = code;
+    this.status = status;
+  }
+}
+
+export interface OpenAIRetryOptions {
+  attempts?: number;
+  // Absolute epoch-ms deadline SHARED across all attempts. Every attempt and
+  // every backoff sleep must finish before this instant; once it passes we stop
+  // retrying and throw OPENAI_TIMEOUT. This is what keeps synchronous planning
+  // safely under Heroku's 30s request limit.
+  deadline?: number;
+  // Hard cap for a single attempt even if the shared deadline allows more.
+  perAttemptMs?: number;
+}
+
 // Transient-failure retry for OpenAI calls. Retries on network errors and on
 // 429/5xx responses with exponential backoff; never retries 400/401/403 (a
-// schema or auth error will not fix itself). Keeps one transient blip from
-// failing a whole workflow.
-export async function fetchOpenAIWithRetry(url: string, init: RequestInit, attempts = 3): Promise<Response> {
+// schema or auth error will not fix itself). All attempts share one overall
+// `deadline`, so retries never restart a fresh full timeout — the total time is
+// bounded. Each attempt is also aborted individually via AbortController.
+export async function fetchOpenAIWithRetry(url: string, init: RequestInit, optionsOrAttempts: OpenAIRetryOptions | number = {}): Promise<Response> {
+  const options: OpenAIRetryOptions = typeof optionsOrAttempts === 'number' ? { attempts: optionsOrAttempts } : optionsOrAttempts;
+  const attempts = options.attempts ?? 3;
+  const deadline = options.deadline ?? Number.POSITIVE_INFINITY;
+  const perAttemptMs = options.perAttemptMs ?? 20_000;
   let lastError: unknown;
+
   for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      throw new OpenAIError('OPENAI_TIMEOUT', 'OpenAI planning exceeded the allotted time budget.');
+    }
+    // Abort this attempt at whichever is sooner: the shared deadline or the
+    // per-attempt cap.
+    const controller = new AbortController();
+    const attemptBudget = Math.min(remaining, perAttemptMs);
+    const timer = setTimeout(() => controller.abort(), attemptBudget);
     try {
-      const response = await fetch(url, init);
+      const response = await fetch(url, { ...init, signal: controller.signal });
+      clearTimeout(timer);
       if (response.ok) return response;
-      // Retry only on rate-limit / server errors.
       if (response.status === 429 || response.status >= 500) {
-        lastError = new Error(`OpenAI returned ${response.status}`);
-        if (attempt < attempts - 1) {
-          await new Promise((resolve) => setTimeout(resolve, 400 * 2 ** attempt + Math.floor(Math.random() * 200)));
+        lastError = new OpenAIError(response.status === 429 ? 'OPENAI_RATE_LIMITED' : 'OPENAI_NETWORK', `OpenAI returned ${response.status}`, response.status);
+        const backoff = 400 * 2 ** attempt + Math.floor(Math.random() * 200);
+        if (attempt < attempts - 1 && Date.now() + backoff < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, backoff));
           continue;
         }
+        // Out of attempts or budget.
+        throw lastError;
       }
       return response; // non-retryable (e.g. 400/401) — let caller handle it
     } catch (error) {
-      lastError = error;
-      if (attempt < attempts - 1) {
-        await new Promise((resolve) => setTimeout(resolve, 400 * 2 ** attempt + Math.floor(Math.random() * 200)));
+      clearTimeout(timer);
+      if (error instanceof OpenAIError) throw error;
+      // AbortError means we hit the attempt budget / shared deadline.
+      const aborted = (error as any)?.name === 'AbortError';
+      lastError = aborted
+        ? new OpenAIError('OPENAI_TIMEOUT', 'OpenAI request timed out.')
+        : new OpenAIError('OPENAI_NETWORK', error instanceof Error ? error.message : 'OpenAI network error.');
+      if (aborted && Date.now() >= deadline) throw lastError;
+      const backoff = 400 * 2 ** attempt + Math.floor(Math.random() * 200);
+      if (attempt < attempts - 1 && Date.now() + backoff < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, backoff));
         continue;
       }
+      throw lastError;
     }
   }
-  throw lastError instanceof Error ? lastError : new Error('OpenAI request failed after retries.');
+  throw lastError instanceof Error ? lastError : new OpenAIError('OPENAI_NETWORK', 'OpenAI request failed after retries.');
 }
 
 const ALWAYS_APPROVAL_ACTIONS = new Set([
@@ -546,7 +597,10 @@ function fallbackPlan(command: string, context: Record<string, unknown>): MainAg
   };
 }
 
-export async function planWithOpenAI(command: string, context: Record<string, unknown>): Promise<{ plan: MainAgentPlan; source: 'openai' | 'fallback' | 'cache' }> {
+export async function planWithOpenAI(command: string, context: Record<string, unknown>, options: { deadline?: number } = {}): Promise<{ plan: MainAgentPlan; source: 'openai' | 'fallback' | 'cache' }> {
+  // Default planning budget: comfortably under Heroku's 30s request limit for
+  // the synchronous path. The async worker passes a longer deadline.
+  const deadline = options.deadline ?? Date.now() + Number(process.env.PLAN_SYNC_DEADLINE_MS ?? 22_000);
   const cacheKey = `brain:${crypto.createHash('sha256').update(`${command}:${JSON.stringify(context)}`).digest('hex')}`;
   const cached = agentStore.getCache(cacheKey);
   if (cached) {
@@ -585,7 +639,7 @@ export async function planWithOpenAI(command: string, context: Record<string, un
         },
       },
     }),
-  });
+  }, { deadline });
 
   if (!response.ok) {
     const detail = await response.text();

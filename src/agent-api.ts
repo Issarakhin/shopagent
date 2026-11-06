@@ -43,7 +43,11 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 
 export const agentApi = {
   state: () => request<AgentState>('/admin/state'),
-  plan: (command: string) => request<any>('/admin/main-agent/plan', { method: 'POST', body: JSON.stringify({ command }) }),
+  // Planning is asynchronous: enqueue a job (202 + jobId). The idempotencyKey
+  // makes a resubmission return the same job instead of a duplicate workflow.
+  planEnqueue: (command: string, idempotencyKey: string) =>
+    request<{ jobId: string; status: string; deduped: boolean }>('/admin/main-agent/plan', { method: 'POST', body: JSON.stringify({ command, idempotencyKey }) }),
+  planJob: (jobId: string) => request<any>(`/admin/main-agent/jobs/${jobId}`),
   updateControls: (patch: Record<string, boolean>) => request('/admin/controls', { method: 'PATCH', body: JSON.stringify(patch) }),
   toggleSkill: (skillId: string, enabled: boolean) => request(`/admin/skills/${skillId}`, { method: 'PATCH', body: JSON.stringify({ enabled }) }),
   toggleAction: (skillId: string, actionId: string, enabled: boolean) => request(`/admin/skills/${skillId}/actions/${actionId}`, { method: 'PATCH', body: JSON.stringify({ enabled }) }),

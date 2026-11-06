@@ -133,6 +133,7 @@ export default function AgentAdminCenter({ products, onShowNotification }: Props
   const [editingCampaign, setEditingCampaign] = useState<Campaign | null>(null);
   const [subscriber, setSubscriber] = useState({ chatId: '', displayName: '', marketingConsent: false, language: 'both' });
   const [demand, setDemand] = useState<any>(null);
+  const [planStatus, setPlanStatus] = useState<'idle' | 'pending' | 'processing' | 'completed' | 'failed'>('idle');
 
   const refresh = async () => {
     setLoading(true);
@@ -165,15 +166,44 @@ export default function AgentAdminCenter({ products, onShowNotification }: Props
   };
 
   const submitCommand = async () => {
-    if (!command.trim()) return;
+    // Guard against duplicate "Create Workflow" clicks: ignore while a plan is
+    // already in flight. The server-side idempotency key is a second backstop.
+    if (!command.trim() || busy === 'plan') return;
     setBusy('plan');
+    setPlanStatus('pending');
+    const idempotencyKey = (typeof crypto !== 'undefined' && 'randomUUID' in crypto)
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     try {
-      const result = await agentApi.plan(command.trim());
-      setLastPlan(result);
-      onShowNotification('Main Agent created and started the workflow.', 'success');
-      await refresh();
-      if (result?.workflow?.id) setExpandedWorkflow(result.workflow.id);
+      const { jobId } = await agentApi.planEnqueue(command.trim(), idempotencyKey);
+      // Poll the job until it finishes or we hit a safety timeout (~3 min).
+      const started = Date.now();
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        if (Date.now() - started > 180_000) {
+          setPlanStatus('failed');
+          onShowNotification('Planning is taking longer than expected. Check Workflows shortly.', 'warning');
+          break;
+        }
+        const job = await agentApi.planJob(jobId);
+        if (job.status === 'processing') setPlanStatus('processing');
+        if (job.status === 'completed') {
+          setPlanStatus('completed');
+          setLastPlan({ workflow: job.workflow, plan: job.plan, source: job.source });
+          onShowNotification(job.workflowId ? 'Main Agent created and started the workflow.' : 'Main Agent responded.', 'success');
+          await refresh();
+          if (job.workflowId) setExpandedWorkflow(job.workflowId);
+          break;
+        }
+        if (job.status === 'failed') {
+          setPlanStatus('failed');
+          onShowNotification(job.error?.message ?? 'Planning failed.', 'error');
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+      }
     } catch (error) {
+      setPlanStatus('failed');
       onShowNotification(error instanceof Error ? error.message : 'Planning failed.', 'error');
     } finally {
       setBusy(null);
@@ -244,10 +274,26 @@ export default function AgentAdminCenter({ products, onShowNotification }: Props
                   {['Create a premium story campaign for Kampot Durian aimed at families', 'Prepare a daily business summary', 'Predict products that need restocking', 'Find revenue optimization opportunities', 'Scan Cambodia market trends and recommend what to boost today'].map((item) => <button key={item} onClick={() => setCommand(item)} className="rounded-full border border-gray-200 bg-white px-3 py-1.5 text-[11px] text-gray-600 hover:border-emerald-300 hover:text-emerald-700">{item}</button>)}
                 </div>
                 <button onClick={submitCommand} disabled={busy === 'plan' || !state.controls.brainEnabled} className="inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50">
-                  {busy === 'plan' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />} Create Workflow
+                  {busy === 'plan' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+                  {busy === 'plan'
+                    ? planStatus === 'processing' ? 'Planning…' : 'Queued…'
+                    : 'Create Workflow'}
                 </button>
               </div>
             </div>
+            {busy === 'plan' && (
+              <div className="mt-3 flex items-center gap-2 rounded-xl border border-amber-100 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-800">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                {planStatus === 'processing'
+                  ? 'The Main Agent is planning your workflow. This can take up to a couple of minutes for complex requests — you can keep using the panel.'
+                  : 'Your request is queued and will start processing momentarily.'}
+              </div>
+            )}
+            {planStatus === 'failed' && busy !== 'plan' && (
+              <div className="mt-3 rounded-xl border border-red-100 bg-red-50 px-3 py-2 text-xs font-medium text-red-700">
+                The last planning request did not complete. You can adjust the request and try again.
+              </div>
+            )}
             {lastPlan && (
               <div className="mt-4 rounded-2xl border border-emerald-100 bg-emerald-50 p-4">
                 <div className="flex items-start gap-3"><Sparkles className="mt-0.5 h-5 w-5 text-emerald-600" /><div><p className="text-sm font-bold text-emerald-900">{lastPlan.plan?.summary}</p><p className="mt-1 text-xs text-emerald-700">Planner source: {lastPlan.source}. Workflow: {lastPlan.workflow?.name}</p></div></div>

@@ -56,3 +56,68 @@ Heroku API cross-origin.
 > `VITE_ADMIN_API_KEY` is visible to anyone who inspects the site. This matches the
 > app's current design; for a real production system, move admin authentication
 > behind a server-side session instead of a shared client-visible key.
+
+## Asynchronous Main-Agent planning (avoids Heroku's 30s H12 timeout)
+
+Main-Agent planning calls OpenAI and then runs the resulting workflow, which can
+take longer than Heroku's hard **30-second** request limit (`H12 Request timeout`,
+`status=503`). To prevent that, planning is **asynchronous**:
+
+- `POST /api/agent/admin/main-agent/plan` enqueues a durable job and returns
+  **HTTP 202** with `{ jobId }` immediately.
+- The client polls `GET /api/agent/admin/main-agent/jobs/:id` until the job is
+  `completed` or `failed` and then shows the workflow.
+- Jobs are stored in the agent state (persisted to Firestore), so they **survive
+  dyno restarts**; a job left `processing` by a crashed dyno is recovered on boot.
+- An `idempotencyKey` on the POST makes a resubmission return the **same** job, so
+  repeated "Create Workflow" clicks never create duplicate workflows.
+- The synchronous OpenAI path is additionally bounded by `PLAN_SYNC_DEADLINE_MS`
+  (default 22s) with retries that **share** one deadline instead of each starting
+  a fresh timeout.
+
+### Worker options
+
+By default the planning worker runs **in-process inside the web dyno** — no extra
+dyno or configuration is required, and this is enough for most traffic.
+
+For higher throughput you can run a **dedicated worker dyno**:
+
+1. Use this `Procfile`:
+   ```
+   web:    npm start
+   worker: npm run worker
+   ```
+2. Set `WORKER_MODE=external` on the app so the web dyno does **not** also run the
+   in-process worker:
+   ```
+   heroku config:set WORKER_MODE=external -a <your-app>
+   ```
+3. Scale the worker dyno:
+   ```
+   heroku ps:scale worker=1 -a <your-app>
+   ```
+
+Both dynos share the same Firestore-backed job queue, and job claiming is
+lease-based, so running the worker in both places is safe (`WORKER_MODE` just
+avoids doing the work twice).
+
+### Tunable environment variables
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `PLAN_SYNC_DEADLINE_MS` | `22000` | Overall budget for a synchronous OpenAI plan call (keep < 30000). |
+| `PLAN_WORKER_DEADLINE_MS` | `120000` | Budget the background worker gives a planning job. |
+| `PLAN_JOB_LEASE_MS` | `150000` | How long a claimed job is leased before it is considered orphaned. |
+| `PLAN_JOB_MAX_ATTEMPTS` | `2` | Max processing attempts before a job is marked failed. |
+| `PLAN_WORKER_POLL_MS` | `1500` | How often the in-process worker polls for new jobs. |
+| `WORKER_MODE` | _(unset)_ | Set to `external` to move the worker to a dedicated dyno. |
+
+### Redeployment steps
+
+1. `git push heroku <branch>:main` (or trigger your Heroku deploy) to build both
+   `dist/server.cjs` and `dist/worker.cjs`.
+2. If using a dedicated worker, set `WORKER_MODE=external` and
+   `heroku ps:scale worker=1`.
+3. Confirm the boot log shows `[planning-worker] started`.
+4. In the admin panel, submit a Main-Agent command: it should return immediately
+   with a "Queued…/Planning…" state and resolve to a workflow without a 503.

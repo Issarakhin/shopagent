@@ -8,6 +8,7 @@ import { configureHeartbeat } from './server/heartbeat.js';
 import { agentStore } from './server/store.js';
 import { refreshBusinessDataFromFirestore } from './server/business-data.js';
 import { resumePendingWorkflows } from './server/agent-engine.js';
+import { startPlanningWorker } from './server/planning-jobs.js';
 
 const app = express();
 // Heroku (and most PaaS hosts) inject the port to bind via process.env.PORT.
@@ -661,6 +662,11 @@ async function startServer() {
     .then(() => agentStore.refreshTelegramSubscribers())
     .then(() => resumePendingWorkflows())
     .then((count) => { if (count) console.log(`Resumed ${count} in-flight workflow(s) after restart.`); })
+    // Start the in-process planning worker AFTER state is hydrated, so any jobs
+    // left pending/processing by a previous dyno are recovered and resumed.
+    // Set WORKER_MODE=external to run the worker in a separate dyno instead
+    // (see Procfile / README); the web dyno then skips the in-process worker.
+    .then(() => { if (process.env.WORKER_MODE !== 'external') startPlanningWorker(); })
     .catch((error) => console.error('Firestore hydration failed:', error));
   void refreshBusinessDataFromFirestore().catch((error) =>
     console.error('Business data refresh failed:', error));

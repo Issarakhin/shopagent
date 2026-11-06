@@ -4,12 +4,12 @@ import {
   captureAndQualifyLead,
   computeDemandIndex,
   createBoostApproval,
-  createWorkflowFromCommand,
   decideApproval,
   retryFailedCampaignRecipients,
   runWorkflow,
   updateCampaignDraft,
 } from './agent-engine.js';
+import { enqueuePlanningJob, getPlanningJob, runPlanningWorkerOnce } from './planning-jobs.js';
 import { configureHeartbeat, runHeartbeat } from './heartbeat.js';
 import {
   calculateCustomerSegments,
@@ -224,16 +224,47 @@ agentRouter.patch('/admin/skills/:skillId/actions/:actionId', requireRole('owner
   }
 });
 
-agentRouter.post('/admin/main-agent/plan', requireRole('owner', 'admin', 'operator'), async (req, res) => {
+// Main-Agent planning is ASYNCHRONOUS: planning + running the workflow can
+// exceed Heroku's 30s request limit (H12). We enqueue a durable job and return
+// 202 immediately with a job id the client polls. The idempotencyKey makes a
+// retried submission return the SAME job (no duplicate workflows).
+agentRouter.post('/admin/main-agent/plan', requireRole('owner', 'admin', 'operator'), (req, res) => {
   try {
     const command = String(req.body?.command ?? '').trim();
     if (!command) return res.status(400).json({ error: 'Command is required.' });
-    const result = await createWorkflowFromCommand(command, actorFrom(req));
-    res.status(201).json(result);
+    if (!agentStore.getState().controls.brainEnabled) {
+      return res.status(409).json({ error: 'Main Agent brain is disabled.', code: 'BRAIN_DISABLED' });
+    }
+    const idempotencyKey = typeof req.body?.idempotencyKey === 'string' ? req.body.idempotencyKey : undefined;
+    const { job, deduped } = enqueuePlanningJob({ command, actor: actorFrom(req), actorRole: roleFrom(req), idempotencyKey });
+    if (!deduped) {
+      agentStore.addAudit({ actor: actorFrom(req), actorRole: roleFrom(req), action: 'main_agent_plan_queued', inputSummary: command, resultSummary: `Planning job ${job.id} queued.`, success: true });
+    }
+    // Make the worker responsive even if the background poller is between ticks.
+    void runPlanningWorkerOnce().catch(() => {});
+    res.status(202).json({ jobId: job.id, status: job.status, deduped });
   } catch (error: any) {
-    agentStore.addAudit({ actor: actorFrom(req), actorRole: roleFrom(req), action: 'main_agent_plan_failed', inputSummary: String(req.body?.command ?? ''), resultSummary: 'Planning failed.', success: false, error: { code: error?.code ?? 'PLAN_FAILED', message: error instanceof Error ? error.message : String(error) } });
     res.status(400).json({ error: error instanceof Error ? error.message : String(error), code: error?.code });
   }
+});
+
+// Poll a planning job. Returns status and, when completed, the workflow + plan.
+agentRouter.get('/admin/main-agent/jobs/:id', requireRole('owner', 'admin', 'operator'), (req, res) => {
+  const job = getPlanningJob(req.params.id);
+  if (!job) return res.status(404).json({ error: 'Planning job not found.' });
+  const workflow = job.workflowId ? agentStore.getState().workflows.find((item) => item.id === job.workflowId) ?? null : null;
+  res.json({
+    id: job.id,
+    status: job.status,
+    command: job.command,
+    plan: job.plan ?? null,
+    source: job.source ?? null,
+    workflowId: job.workflowId ?? null,
+    workflow,
+    error: job.error ?? null,
+    createdAt: job.createdAt,
+    updatedAt: job.updatedAt,
+  });
 });
 
 agentRouter.post('/admin/workflows/:id/run', requireRole('owner', 'admin', 'operator'), async (req, res) => {

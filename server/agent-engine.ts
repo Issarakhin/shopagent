@@ -1595,7 +1595,7 @@ export async function broadcastDailyMarketUpdate(actor = 'system'): Promise<{ sk
   return { skipped: false, sent, failed };
 }
 
-export async function createWorkflowFromCommand(command: string, actor: string): Promise<{ workflow: Workflow | null; plan: MainAgentPlan; source: string }> {
+export async function createWorkflowFromCommand(command: string, actor: string, options: { deadline?: number } = {}): Promise<{ workflow: Workflow | null; plan: MainAgentPlan; source: string }> {
   const state = agentStore.getState();
   if (!state.controls.brainEnabled) throw Object.assign(new Error('Main Agent brain is disabled.'), { code: 'BRAIN_DISABLED' });
   const context = {
@@ -1618,7 +1618,7 @@ export async function createWorkflowFromCommand(command: string, actor: string):
     latestCambodiaMarketTrends: (state.marketTrends ?? []).slice(0, 8).map((item) => ({ id: item.id, title: item.title, direction: item.direction, confidence: item.confidence, matchedProductIds: item.matchedProductIds, matchedCategories: item.matchedCategories })),
     approvalPolicy: state.skills.flatMap((skill) => skill.actions.filter((action) => action.approvalRequired).map((action) => ({ skill: skill.id, action: action.id, riskLevel: action.riskLevel }))),
   };
-  const { plan, source } = await planWithOpenAI(command, context);
+  const { plan, source } = await planWithOpenAI(command, context, { deadline: options.deadline });
   // A request that needs no multi-step workflow (an answer or a clarifying
   // question) should return the agent's response, not fail with a generic error.
   if (!plan.requiresWorkflow || !plan.workflow) {

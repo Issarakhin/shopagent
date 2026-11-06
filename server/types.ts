@@ -412,6 +412,33 @@ export interface AgentState {
   shipments: Shipment[];
   deliveryExceptions: DeliveryException[];
   leads: Lead[];
+  planningJobs: PlanningJob[];
+}
+
+// An asynchronous Main-Agent planning job. Planning (OpenAI) plus running the
+// resulting workflow can exceed Heroku's 30s request limit, so the HTTP layer
+// enqueues a job and returns immediately; a durable worker processes it. Jobs
+// live in the agent state, which persists to Firestore, so they survive dyno
+// restarts. The idempotencyKey makes retried submissions safe (no duplicate
+// workflows).
+export interface PlanningJob {
+  id: string;
+  idempotencyKey: string;
+  command: string;
+  actor: string;
+  actorRole: string;
+  status: 'pending' | 'processing' | 'completed' | 'failed';
+  attempts: number;
+  workflowId?: string;
+  plan?: MainAgentPlan;
+  source?: string;
+  result?: { workflowId: string | null; plan: MainAgentPlan; source: string };
+  error?: { code: string; message: string };
+  createdAt: string;
+  updatedAt: string;
+  startedAt?: string;
+  finishedAt?: string;
+  leaseExpiresAt?: string;
 }
 
 // A potential customer captured from a PERMITTED source (an inbound inquiry, a
