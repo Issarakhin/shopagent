@@ -132,6 +132,7 @@ export default function AgentAdminCenter({ products, onShowNotification }: Props
   const [expandedWorkflow, setExpandedWorkflow] = useState<string | null>(null);
   const [editingCampaign, setEditingCampaign] = useState<Campaign | null>(null);
   const [subscriber, setSubscriber] = useState({ chatId: '', displayName: '', marketingConsent: false, language: 'both' });
+  const [demand, setDemand] = useState<any>(null);
 
   const refresh = async () => {
     setLoading(true);
@@ -341,6 +342,61 @@ export default function AgentAdminCenter({ products, onShowNotification }: Props
               })()}
             </div>
           </Card>
+
+          <Card>
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h3 className="font-bold text-gray-900">Customer demand (real-time)</h3>
+                <p className="mt-1 text-xs text-gray-500">Built from your own storefront activity (searches, views, carts, purchases) and qualified leads — indexed by location. We never scrape private social accounts; connect an authorized provider to add an external source.</p>
+              </div>
+              <button
+                onClick={() => doAction('demand', async () => { const d = await agentApi.demand(30); setDemand(d); return d; }, 'Customer demand updated.')}
+                disabled={busy === 'demand'}
+                className="shrink-0 rounded-lg bg-emerald-600 px-3 py-2 text-xs font-semibold text-white disabled:opacity-50"
+              >
+                {busy === 'demand' ? 'Updating…' : 'Update demand'}
+              </button>
+            </div>
+            {demand && (
+              <div className="mt-4 grid gap-4 lg:grid-cols-2">
+                <div>
+                  <p className="text-[10px] font-bold uppercase text-gray-400">Top demanded products ({demand.totalSignals} signals)</p>
+                  {(demand.topProducts ?? []).length === 0 ? <p className="mt-2 text-xs text-gray-400">Not enough activity yet.</p> : (
+                    <ol className="mt-2 space-y-1">
+                      {demand.topProducts.map((p: any) => (
+                        <li key={p.productId} className="flex items-center justify-between rounded-lg bg-gray-50 px-3 py-2 text-xs">
+                          <span className="font-semibold text-gray-800">{p.name}</span>
+                          <span className="text-gray-500">score {p.score} · stock {p.stock}{p.leadInterest ? ` · ${p.leadInterest} lead${p.leadInterest === 1 ? '' : 's'}` : ''}</span>
+                        </li>
+                      ))}
+                    </ol>
+                  )}
+                </div>
+                <div>
+                  <p className="text-[10px] font-bold uppercase text-gray-400">Phnom Penh-confirmed demand ({demand.phnomPenhSignals} leads)</p>
+                  {(demand.phnomPenhDemand ?? []).length === 0 ? <p className="mt-2 text-xs text-gray-400">No confirmed Phnom Penh demand yet.</p> : (
+                    <ol className="mt-2 space-y-1">
+                      {demand.phnomPenhDemand.map((p: any) => (
+                        <li key={p.productId} className="flex items-center justify-between rounded-lg bg-emerald-50 px-3 py-2 text-xs">
+                          <span className="font-semibold text-emerald-900">{p.name}</span>
+                          <span className="text-emerald-700">score {p.phnomPenhScore}</span>
+                        </li>
+                      ))}
+                    </ol>
+                  )}
+                  {(demand.topCategories ?? []).length > 0 && (
+                    <div className="mt-3">
+                      <p className="text-[10px] font-bold uppercase text-gray-400">Top categories</p>
+                      <div className="mt-1 flex flex-wrap gap-2">
+                        {demand.topCategories.map((c: any) => <span key={c.category} className="rounded-full bg-gray-100 px-2 py-0.5 text-[10px] font-semibold text-gray-600">{c.category} · {c.score}</span>)}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </Card>
+
           {(state.leads ?? []).length === 0 ? (
             <Card><Empty text="No leads yet. Leads arrive from the storefront inquiry form, the Telegram bot, or referrals." /></Card>
           ) : (

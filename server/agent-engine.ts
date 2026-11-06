@@ -640,21 +640,34 @@ async function executeSkill(workflow: Workflow, step: WorkflowStep): Promise<Ski
     }
 
     case 'sales:discover_social_opportunities': {
-      // Honest compliance boundary: automated listening/scraping of Facebook,
-      // Instagram, TikTok, etc. is NOT available without approved platform API
-      // credentials. We never scrape private accounts or fabricate leads.
+      // We never scrape private Facebook/Instagram/TikTok accounts. Customer
+      // demand is discovered two compliant ways, and both run here:
+      //   1. A LOCATION-INDEXED demand signal computed in real time from our OWN
+      //      first-party data (storefront searches, views, carts, purchases, and
+      //      qualified leads) — this always works, needs no third party.
+      //   2. If an AUTHORIZED listening provider is connected, a live query to it.
+      const demand = computeDemandIndex();
       const configured = Boolean(process.env.SOCIAL_LISTENING_PROVIDER && process.env.SOCIAL_LISTENING_TOKEN);
-      if (!configured) {
-        return success(step.skill, step.action, 'No approved social-listening source is configured, so no public signals were collected.', {
-          configured: false,
-          opportunities: [],
-          compliantAlternatives: [
-            'Capture genuine inbound inquiries via the Telegram bot or a website inquiry form (with consent), then qualify them with sales.qualify_customer_lead.',
-            'Connect an approved platform API (e.g. Meta Graph API for your OWN business page, or an authorized listening provider) and set SOCIAL_LISTENING_PROVIDER + SOCIAL_LISTENING_TOKEN.',
-          ],
-        }, ['Live public social discovery requires authorized platform API access; none is configured.']);
+      let provider: { configured: boolean; ok?: boolean; opportunities: any[]; error?: string } = { configured, opportunities: [] };
+      if (configured) {
+        provider = await querySocialListeningProvider(String(input.query ?? input.requestText ?? 'customer demand Phnom Penh'));
       }
-      return success(step.skill, step.action, 'Social-listening provider configured; no live integration implemented yet.', { configured: true, opportunities: [] }, ['Provider configured but the live query is not implemented — reporting honestly rather than inventing leads.']);
+      const warnings: string[] = [];
+      if (!configured) warnings.push('No authorized social-listening provider is connected; demand is derived from your own first-party signals only. Set SOCIAL_LISTENING_PROVIDER + SOCIAL_LISTENING_TOKEN to add a live external source.');
+      if (configured && provider.ok === false) warnings.push(`The social-listening provider could not be reached: ${provider.error ?? 'unknown error'}. First-party demand is still reported.`);
+      if (demand.topProducts.length === 0) warnings.push('Not enough first-party activity yet to rank product demand — capture more inquiries and storefront traffic.');
+      return success(
+        step.skill,
+        step.action,
+        `Customer demand updated from ${demand.totalSignals} first-party signals${configured ? ' and the connected provider' : ''}. Phnom Penh-confirmed signals: ${demand.phnomPenhSignals}.`,
+        {
+          configured,
+          providerOpportunities: provider.opportunities,
+          demandIndex: demand,
+          generatedAt: now(),
+        },
+        warnings,
+      );
     }
 
     case 'support:categorize_ticket': {
@@ -931,6 +944,13 @@ async function executeSkill(workflow: Workflow, step: WorkflowStep): Promise<Ski
       const subscribers = currentState.telegramSubscribers;
       const segments = Array.isArray(input.segmentIds) ? input.segmentIds.filter((item): item is string => typeof item === 'string') : ['all-consented'];
       const eligibleCount = subscribers.filter((subscriber) => isSubscriberEligible(subscriber, segments)).length;
+      // Always append a direct, working link to each promoted product so the
+      // campaign drives to the live storefront. Links are rebuilt from the
+      // current product ids every time the draft is (re)generated, so they stay
+      // correct even if the product selection changes.
+      const linkBlock = buildProductLinkBlock(selected);
+      const enWithLink = content.en + linkBlock.en;
+      const khWithLink = content.kh + linkBlock.kh;
       const campaign: Campaign = {
         id: id('campaign'),
         name: content.campaignName,
@@ -938,8 +958,8 @@ async function executeSkill(workflow: Workflow, step: WorkflowStep): Promise<Ski
         version: 1,
         productIds: selected.map((product) => product.id),
         segmentIds: segments,
-        telegramMessageKh: content.kh,
-        telegramMessageEn: content.en,
+        telegramMessageKh: khWithLink,
+        telegramMessageEn: enWithLink,
         objective: content.objective,
         userRequest: content.userIntent,
         selectionStrategy,
@@ -1006,18 +1026,169 @@ async function executeSkill(workflow: Workflow, step: WorkflowStep): Promise<Ski
       const boostId = String(input.boostId ?? '');
       const boost = agentStore.getState().boosts.find((item) => item.id === boostId);
       if (!boost) return fail(step.skill, step.action, 'BOOST_NOT_FOUND', 'Product boost was not found.');
+      const durationHours = boostDurationHours(input);
       boost.status = 'active';
       boost.updatedAt = now();
-      boost.expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+      boost.expiresAt = new Date(Date.now() + durationHours * 60 * 60 * 1000).toISOString();
       agentStore.mutate((draft) => {
         const target = draft.boosts.find((item) => item.id === boost.id);
         if (target) Object.assign(target, boost);
       });
-      return success(step.skill, step.action, 'Approved product boost is now active in the storefront.', { boost });
+      return success(step.skill, step.action, `Approved product boost is now active in the storefront for ${formatBoostDuration(durationHours)} (expires ${boost.expiresAt}).`, { boost });
     }
 
     default:
       return fail(step.skill, step.action, 'ACTION_NOT_IMPLEMENTED', 'This action is not implemented.');
+  }
+}
+
+// Resolve how long a boost should stay active. The admin can say "boost for 1
+// day" / "2 hours" and the planner passes durationDays or durationHours; we clamp
+// to a sane range. Default comes from BOOST_DEFAULT_HOURS (env) or 24h.
+function boostDurationHours(input: Record<string, any>): number {
+  const fromDays = Number.isFinite(Number(input.durationDays)) ? Number(input.durationDays) * 24 : NaN;
+  const fromHours = Number.isFinite(Number(input.durationHours)) ? Number(input.durationHours) : NaN;
+  const fallback = Number(process.env.BOOST_DEFAULT_HOURS);
+  const hours = Number.isFinite(fromHours) ? fromHours
+    : Number.isFinite(fromDays) ? fromDays
+    : Number.isFinite(fallback) && fallback > 0 ? fallback
+    : 24;
+  // Clamp between 1 hour and 30 days.
+  return Math.min(30 * 24, Math.max(1, Math.round(hours)));
+}
+
+function formatBoostDuration(hours: number): string {
+  if (hours % 24 === 0) {
+    const days = hours / 24;
+    return `${days} day${days === 1 ? '' : 's'}`;
+  }
+  return `${hours} hour${hours === 1 ? '' : 's'}`;
+}
+
+// Public storefront base URL used to build product links in campaigns. Set
+// STORE_BASE_URL in the backend env to the deployed storefront; falls back to
+// the known production host so links always work out of the box.
+function storeBaseUrl(): string {
+  const raw = process.env.STORE_BASE_URL || process.env.PUBLIC_STORE_URL || 'https://shoppingcambodia-taupe.vercel.app';
+  return raw.replace(/\/$/, '');
+}
+
+// A deep link that opens the specific product on the storefront. The storefront
+// reads ?product=<id> on load and opens that product.
+function productLink(productId: string): string {
+  return `${storeBaseUrl()}/?product=${encodeURIComponent(productId)}`;
+}
+
+function buildProductLinkBlock(products: Array<{ id: string; name: string }>): { en: string; kh: string } {
+  if (!products.length) return { en: '', kh: '' };
+  const lines = products.map((p) => `• ${p.name}: ${productLink(p.id)}`).join('\n');
+  return {
+    en: `\n\n🛒 Shop now:\n${lines}`,
+    kh: `\n\n🛒 ទិញឥឡូវនេះ៖\n${lines}`,
+  };
+}
+
+// Compliant, real-time customer-demand signal built ONLY from our own
+// first-party data: storefront events (search/view/cart/checkout/purchase) and
+// qualified leads. Results are indexed by location so Phnom Penh-confirmed
+// demand is separated from general demand. No scraping, no third party needed.
+export function computeDemandIndex(windowDays = 30) {
+  const products = readProducts();
+  const state = agentStore.getState();
+  const cutoff = Date.now() - windowDays * 24 * 60 * 60 * 1000;
+  const events = (state.events ?? []).filter((e) => {
+    const t = new Date(e.createdAt).getTime();
+    return Number.isFinite(t) ? t >= cutoff : true;
+  });
+  const leads = state.leads ?? [];
+
+  const weights: Record<string, number> = { purchase: 5, add_to_cart: 3, checkout_started: 2, product_view: 1, search: 2 };
+  type Row = { productId: string; name: string; category: string; score: number; phnomPenhScore: number; signals: Record<string, number>; leadInterest: number; stock: number };
+  const rows = new Map<string, Row>();
+  const rowFor = (productId: string): Row | undefined => {
+    const product = products.find((p) => p.id === productId);
+    if (!product) return undefined;
+    if (!rows.has(productId)) {
+      rows.set(productId, { productId, name: product.name, category: product.category, score: 0, phnomPenhScore: 0, signals: {}, leadInterest: 0, stock: availableToPromise(product) });
+    }
+    return rows.get(productId);
+  };
+
+  for (const event of events) {
+    const weight = weights[event.type as string];
+    if (!weight) continue;
+    // Direct product signals.
+    if (typeof event.productId === 'string') {
+      const row = rowFor(event.productId);
+      if (row) {
+        const qty = Number.isFinite(Number(event.quantity)) && Number(event.quantity) > 0 ? Number(event.quantity) : 1;
+        const add = event.type === 'purchase' || event.type === 'add_to_cart' ? weight * qty : weight;
+        row.score += add;
+        row.signals[event.type] = (row.signals[event.type] ?? 0) + add;
+      }
+    }
+    // Free-text searches (metadata.query) matched to the catalogue by name/category.
+    if (event.type === 'search') {
+      const q = String((event.metadata as any)?.query ?? (event.metadata as any)?.term ?? '').toLowerCase();
+      if (q) {
+        for (const product of products) {
+          if (q.includes(product.name.toLowerCase()) || q.includes(String(product.category).toLowerCase())) {
+            const row = rowFor(product.id);
+            if (row) { row.score += weights.search; row.signals.search = (row.signals.search ?? 0) + weights.search; }
+          }
+        }
+      }
+    }
+  }
+
+  // Qualified-lead interest is strong, intent-level demand. Confirmed Phnom Penh
+  // leads also feed the location-specific index.
+  let phnomPenhSignals = 0;
+  for (const lead of leads) {
+    const confirmed = lead.locationConfirmed === true;
+    if (confirmed) phnomPenhSignals += 1;
+    for (const productId of lead.productInterestIds ?? []) {
+      const row = rowFor(productId);
+      if (!row) continue;
+      row.score += 4;
+      row.leadInterest += 1;
+      row.signals.lead_interest = (row.signals.lead_interest ?? 0) + 4;
+      if (confirmed) { row.score += 2; row.phnomPenhScore += 6; }
+    }
+  }
+
+  const all = [...rows.values()].filter((r) => r.score > 0).sort((a, b) => b.score - a.score);
+  const topProducts = all.slice(0, 10);
+  const phnomPenh = [...rows.values()].filter((r) => r.phnomPenhScore > 0).sort((a, b) => b.phnomPenhScore - a.phnomPenhScore).slice(0, 10);
+
+  // Category roll-up.
+  const categoryScores = new Map<string, number>();
+  for (const row of all) categoryScores.set(row.category, (categoryScores.get(row.category) ?? 0) + row.score);
+  const topCategories = [...categoryScores.entries()].map(([category, score]) => ({ category, score })).sort((a, b) => b.score - a.score).slice(0, 6);
+
+  const totalSignals = all.reduce((sum, r) => sum + Object.values(r.signals).reduce((s, v) => s + v, 0), 0);
+  return { windowDays, totalSignals, phnomPenhSignals, topProducts, phnomPenhDemand: phnomPenh, topCategories };
+}
+
+// Live query to an AUTHORIZED social-listening provider, when one is connected.
+// Generic contract: GET <SOCIAL_LISTENING_PROVIDER>?q=<query> with a Bearer
+// token; expects JSON (array, or {opportunities|results|data:[...]}). Never
+// throws — reports the error honestly so the agent does not fabricate demand.
+async function querySocialListeningProvider(query: string): Promise<{ configured: true; ok: boolean; opportunities: any[]; error?: string }> {
+  const base = String(process.env.SOCIAL_LISTENING_PROVIDER ?? '').replace(/\/$/, '');
+  const token = String(process.env.SOCIAL_LISTENING_TOKEN ?? '');
+  try {
+    const url = `${base}${base.includes('?') ? '&' : '?'}q=${encodeURIComponent(query)}`;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 8000);
+    const response = await fetch(url, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' }, signal: controller.signal });
+    clearTimeout(timer);
+    if (!response.ok) return { configured: true, ok: false, opportunities: [], error: `provider responded ${response.status}` };
+    const data: any = await response.json().catch(() => null);
+    const list = Array.isArray(data) ? data : Array.isArray(data?.opportunities) ? data.opportunities : Array.isArray(data?.results) ? data.results : Array.isArray(data?.data) ? data.data : [];
+    return { configured: true, ok: true, opportunities: list.slice(0, 50) };
+  } catch (error) {
+    return { configured: true, ok: false, opportunities: [], error: error instanceof Error ? error.message : 'request failed' };
   }
 }
 

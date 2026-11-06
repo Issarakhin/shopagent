@@ -280,3 +280,41 @@ test('a specifically named product stays the only selected campaign product', as
   assert.equal(campaign.userRequest, request);
   assert.equal(campaign.campaignPurpose, 'product visibility and interest');
 });
+
+test('campaign content always includes a working link to each promoted product', async () => {
+  agentStore.reset();
+  process.env.STORE_BASE_URL = 'https://shop.example.com';
+  await createWorkflowFromCommand('Boost Kampot Durian with a short campaign.', 'test-admin');
+  const campaign = agentStore.getState().campaigns[0];
+  const link = 'https://shop.example.com/?product=prod_fr1';
+  assert.ok(campaign.telegramMessageEn.includes(link), 'English content should link the product');
+  assert.ok(campaign.telegramMessageKh.includes(link), 'Khmer content should link the product');
+  delete process.env.STORE_BASE_URL;
+});
+
+test('activated product boost has a configurable time limit and expires', async () => {
+  agentStore.reset();
+  const products = readProducts();
+  const productId = products[0].id;
+  const boostId = 'boost_time_test';
+  agentStore.mutate((draft) => {
+    draft.boosts.unshift({ id: boostId, productId, score: 10, reason: 'test', status: 'pending_approval', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
+  });
+  const workflowId = 'workflow_boost_time';
+  agentStore.mutate((draft) => {
+    draft.workflows.unshift({
+      id: workflowId, name: 'Boost 1 day', goal: 'boost', status: 'pending', progress: 0, riskLevel: 'high',
+      createdBy: 'test-admin', createdAt: new Date().toISOString(), relatedRecords: [productId],
+      steps: [{ id: 'step_1', workflowId, skill: 'marketing', action: 'activate_product_boost', dependsOn: [], requiresApproval: false, status: 'pending', input: { boostId, durationDays: 1 }, attempt: 0, idempotencyKey: `${workflowId}:marketing:activate_product_boost:step_1` }],
+    });
+  });
+  await runWorkflow(workflowId, 'test-admin');
+  const approval = agentStore.getState().approvals.find((a) => a.workflowId === workflowId && a.status === 'pending');
+  assert.ok(approval);
+  await decideApproval(approval.id, 'approved', 'human-reviewer');
+  const boost = agentStore.getState().boosts.find((b) => b.id === boostId);
+  assert.equal(boost?.status, 'active');
+  assert.ok(boost?.expiresAt);
+  const hours = (new Date(boost!.expiresAt!).getTime() - Date.now()) / (60 * 60 * 1000);
+  assert.ok(hours > 23 && hours <= 24.1, `expected ~24h, got ${hours}`);
+});

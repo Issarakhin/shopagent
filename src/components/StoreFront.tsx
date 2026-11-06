@@ -42,6 +42,19 @@ export default function StoreFront({
     void fetchPublicBoosts().then(setBoosts);
   }, []);
 
+  // Open a product directly when arrived via a campaign deep link (?product=<id>).
+  useEffect(() => {
+    if (typeof window === 'undefined' || !products.length) return;
+    const params = new URLSearchParams(window.location.search);
+    const wanted = params.get('product');
+    if (!wanted) return;
+    const match = products.find((p) => p.id === wanted);
+    if (match) {
+      setSelectedProduct(match);
+      void trackStoreEvent({ type: 'product_view', productId: match.id, value: match.price, metadata: { via: 'campaign_link' } });
+    }
+  }, [products]);
+
   const handleInquirySubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!inquiryText.trim()) return;

@@ -61,6 +61,7 @@ export const agentApi = {
   addSubscriber: (subscriber: Record<string, unknown>) => request('/admin/telegram-subscribers', { method: 'POST', body: JSON.stringify(subscriber) }),
   scanMarketIntelligence: (requestText?: string) => request('/admin/market-intelligence/scan', { method: 'POST', body: JSON.stringify({ request: requestText, force: true }) }),
   leads: () => request<any[]>('/admin/leads'),
+  demand: (windowDays = 30) => request<any>(`/admin/demand?windowDays=${windowDays}`),
 };
 
 // Public, unauthenticated: a storefront visitor submits their own inquiry with

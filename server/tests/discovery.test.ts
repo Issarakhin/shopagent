@@ -14,7 +14,7 @@ delete process.env.SOCIAL_LISTENING_TOKEN;
 process.env.TELEGRAM_LIVE_SEND = 'false';
 
 const { agentStore } = await import('../store.js');
-const { captureAndQualifyLead, decideApproval, runWorkflow } = await import('../agent-engine.js');
+const { captureAndQualifyLead, computeDemandIndex, decideApproval, runWorkflow } = await import('../agent-engine.js');
 const { readProducts, writeProducts } = await import('../business-data.js');
 
 function seedSalesWorkflow(action: string, input: Record<string, unknown>) {
@@ -132,13 +132,37 @@ test('draft_lead_outreach is blocked for a lead without consent', async () => {
   assert.equal(step?.error?.code, 'NO_CONSENT');
 });
 
-test('discover_social_opportunities reports the compliance limit instead of fabricating leads', async () => {
+test('discover_social_opportunities derives first-party demand and never scrapes when no provider is set', async () => {
   agentStore.reset();
+  delete process.env.SOCIAL_LISTENING_PROVIDER;
+  delete process.env.SOCIAL_LISTENING_TOKEN;
   const workflowId = seedSalesWorkflow('discover_social_opportunities', {});
   await runWorkflow(workflowId, 'test-admin');
   const step = agentStore.getState().workflows.find((w) => w.id === workflowId)?.steps[0];
   assert.equal(step?.status, 'completed');
+  // No external provider configured, so no provider opportunities were fetched...
   assert.equal(step?.output?.configured, false);
-  assert.deepEqual(step?.output?.opportunities, []);
-  assert.ok(Array.isArray(step?.output?.compliantAlternatives) && step.output.compliantAlternatives.length > 0);
+  assert.deepEqual(step?.output?.providerOpportunities, []);
+  // ...but a first-party demand index is always produced (never fabricated leads).
+  assert.ok(step?.output?.demandIndex);
+  assert.ok(Array.isArray((step?.output?.demandIndex as any).topProducts));
+});
+
+test('computeDemandIndex ranks products from real first-party signals and separates Phnom Penh demand', () => {
+  agentStore.reset();
+  const products = readProducts();
+  const product = products[0];
+  // Real storefront signals + a confirmed Phnom Penh lead.
+  agentStore.mutate((draft) => {
+    draft.events.unshift(
+      { id: 'e1', type: 'purchase', productId: product.id, quantity: 2, createdAt: new Date().toISOString() } as any,
+      { id: 'e2', type: 'product_view', productId: product.id, createdAt: new Date().toISOString() } as any,
+    );
+  });
+  captureAndQualifyLead({ inquiryText: `I want ${product.name}`, contactHandle: 'pp@example.com', consentToContact: true, confirmedLocation: true, location: 'Phnom Penh' });
+  const demand = computeDemandIndex(30);
+  assert.ok(demand.totalSignals > 0);
+  assert.ok(demand.topProducts.some((p) => p.productId === product.id));
+  assert.equal(demand.phnomPenhSignals >= 1, true);
+  assert.ok(demand.phnomPenhDemand.some((p) => p.productId === product.id));
 });

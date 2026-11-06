@@ -2,6 +2,7 @@ import { Router, type Request, type Response, type NextFunction } from 'express'
 import { agentStore } from './store.js';
 import {
   captureAndQualifyLead,
+  computeDemandIndex,
   createBoostApproval,
   createWorkflowFromCommand,
   decideApproval,
@@ -271,6 +272,10 @@ agentRouter.post('/admin/campaigns/:id/retry', requireRole('owner', 'admin', 're
 
 agentRouter.get('/admin/telegram-subscribers', (_req, res) => res.json(agentStore.getState().telegramSubscribers));
 agentRouter.get('/admin/leads', requireRole('owner', 'admin', 'operator'), (_req, res) => res.json(agentStore.getState().leads));
+agentRouter.get('/admin/demand', requireRole('owner', 'admin', 'operator'), (req, res) => {
+  const windowDays = Number.isFinite(Number(req.query.windowDays)) ? Math.max(1, Math.min(365, Number(req.query.windowDays))) : 30;
+  res.json(computeDemandIndex(windowDays));
+});
 agentRouter.post('/admin/telegram-subscribers', requireRole('owner', 'admin'), (req, res) => {
   if (!req.body?.chatId) return res.status(400).json({ error: 'chatId is required.' });
   const subscriber: TelegramSubscriber = {
