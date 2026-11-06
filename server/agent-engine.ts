@@ -75,7 +75,14 @@ function protectedActionInputError(step: WorkflowStep): string | undefined {
       return typeof value.recommendationId === 'string' && value.recommendationId ? undefined : 'An exact pricing recommendation is required before approval.';
     case 'adjust_inventory':
       if (typeof value.productId !== 'string' || !value.productId) return 'An exact productId is required before inventory approval.';
-      if (!Number.isFinite(Number(value.adjustment)) && !Number.isFinite(Number(value.setTo))) return 'Provide an exact numeric adjustment or setTo value before inventory approval.';
+      if (
+        !Number.isFinite(Number(value.adjustment)) &&
+        !Number.isFinite(Number(value.setTo)) &&
+        !Number.isFinite(Number(value.reduceByPercent)) &&
+        !Number.isFinite(Number(value.setToPercent))
+      ) {
+        return 'Provide a numeric adjustment, setTo, reduceByPercent, or setToPercent value before inventory approval.';
+      }
       return undefined;
     case 'reserve_stock':
       if (typeof value.productId !== 'string' || !value.productId) return 'An exact productId is required before stock reservation approval.';
@@ -425,8 +432,23 @@ async function executeSkill(workflow: Workflow, step: WorkflowStep): Promise<Ski
       const previousStock = product.stock;
       const hasSetTo = input.setTo !== undefined && Number.isFinite(Number(input.setTo));
       const hasAdjustment = input.adjustment !== undefined && Number.isFinite(Number(input.adjustment));
-      if (!hasSetTo && !hasAdjustment) return fail(step.skill, step.action, 'INVALID_INVENTORY_CHANGE', 'Provide either setTo or adjustment as a number.');
-      const nextStock = hasSetTo ? Math.trunc(Number(input.setTo)) : previousStock + Math.trunc(Number(input.adjustment));
+      // Percentage forms let the agent compute the new amount from the live DB
+      // stock itself, so a "reduce by 20%" command needs no hand-fed number.
+      const hasReduceByPercent = input.reduceByPercent !== undefined && Number.isFinite(Number(input.reduceByPercent));
+      const hasSetToPercent = input.setToPercent !== undefined && Number.isFinite(Number(input.setToPercent));
+      if (!hasSetTo && !hasAdjustment && !hasReduceByPercent && !hasSetToPercent) {
+        return fail(step.skill, step.action, 'INVALID_INVENTORY_CHANGE', 'Provide setTo, adjustment, reduceByPercent, or setToPercent as a number.');
+      }
+      let nextStock: number;
+      if (hasSetTo) {
+        nextStock = Math.trunc(Number(input.setTo));
+      } else if (hasAdjustment) {
+        nextStock = previousStock + Math.trunc(Number(input.adjustment));
+      } else if (hasReduceByPercent) {
+        nextStock = Math.round(previousStock * (1 - Number(input.reduceByPercent) / 100));
+      } else {
+        nextStock = Math.round(previousStock * (Number(input.setToPercent) / 100));
+      }
       if (nextStock < 0) return fail(step.skill, step.action, 'NEGATIVE_STOCK_NOT_ALLOWED', 'Inventory cannot be adjusted below zero.');
       product.stock = nextStock;
       writeProducts(products);
@@ -1529,7 +1551,11 @@ export async function runWorkflow(workflowId: string, actor = 'system'): Promise
           } else if (step.action === 'adjust_inventory') {
             options = {
               summary: `Adjust inventory for ${String(step.input.productId ?? 'selected product')}`,
-              expectedEffect: step.input.setTo !== undefined ? `Set stock to ${String(step.input.setTo)}.` : `Change stock by ${String(step.input.adjustment ?? 'the reviewed amount')}.`,
+              expectedEffect:
+                step.input.setTo !== undefined ? `Set stock to ${String(step.input.setTo)}.`
+                : step.input.reduceByPercent !== undefined ? `Reduce stock by ${String(step.input.reduceByPercent)}% of the current database level.`
+                : step.input.setToPercent !== undefined ? `Set stock to ${String(step.input.setToPercent)}% of the current database level.`
+                : `Change stock by ${String(step.input.adjustment ?? 'the reviewed amount')}.`,
               dataAffected: ['products', 'inventory'],
               rollbackPossible: true,
               resourceId: typeof step.input.productId === 'string' ? step.input.productId : undefined,
