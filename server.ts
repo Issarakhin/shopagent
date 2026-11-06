@@ -7,6 +7,7 @@ import { agentRouter } from './server/routes.js';
 import { configureHeartbeat } from './server/heartbeat.js';
 import { agentStore } from './server/store.js';
 import { refreshBusinessDataFromFirestore } from './server/business-data.js';
+import { resumePendingWorkflows } from './server/agent-engine.js';
 
 const app = express();
 // Heroku (and most PaaS hosts) inject the port to bind via process.env.PORT.
@@ -595,6 +596,8 @@ async function startServer() {
   // CORS headers). Runs in the background.
   void agentStore.hydrateFromFirestore()
     .then(() => agentStore.refreshTelegramSubscribers())
+    .then(() => resumePendingWorkflows())
+    .then((count) => { if (count) console.log(`Resumed ${count} in-flight workflow(s) after restart.`); })
     .catch((error) => console.error('Firestore hydration failed:', error));
   void refreshBusinessDataFromFirestore().catch((error) =>
     console.error('Business data refresh failed:', error));

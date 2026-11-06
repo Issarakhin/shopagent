@@ -366,6 +366,7 @@ export function validatePlan(value: unknown): MainAgentPlan {
     if (!Array.isArray(workflow.steps) || !workflow.steps.every(validateStep)) throw new Error('Invalid workflow steps.');
     const steps = workflow.steps as MainAgentPlanStep[];
     const ids = new Set(steps.map((step) => step.id));
+    if (ids.size !== steps.length) throw new Error('Workflow has duplicate step IDs.');
     for (const step of steps) {
       if (ALWAYS_APPROVAL_ACTIONS.has(step.action)) step.requiresApproval = true;
       for (const dependency of step.dependsOn) {
@@ -373,6 +374,20 @@ export function validatePlan(value: unknown): MainAgentPlan {
         if (dependency === step.id) throw new Error('A step cannot depend on itself.');
       }
     }
+    // Reject circular dependencies (e.g. A→B→A) via a topological sort: if some
+    // steps can never reach zero remaining dependencies, there is a cycle.
+    const remaining = new Map(steps.map((step) => [step.id, new Set(step.dependsOn)]));
+    let progressed = true;
+    while (progressed && remaining.size) {
+      progressed = false;
+      for (const [id, deps] of remaining) {
+        if ([...deps].every((dep) => !remaining.has(dep))) {
+          remaining.delete(id);
+          progressed = true;
+        }
+      }
+    }
+    if (remaining.size) throw new Error('Workflow has a circular dependency.');
   }
   return plan as unknown as MainAgentPlan;
 }

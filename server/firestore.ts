@@ -110,14 +110,20 @@ export async function fetchTelegramSubscribers(): Promise<TelegramSubscriber[]> 
         : typeof data.languageCode === 'string' && data.languageCode.startsWith('en') ? 'en'
         : 'both';
       const subscribed = data.isSubscribed !== false && data.unsubscribed !== true && !data.unsubscribedAt;
+      // Marketing consent must be EXPLICIT: starting the bot is not permission to
+      // receive promotions. Only a recorded opt-in (marketingConsent === true)
+      // counts. An owner who wants to treat captured chats as consented during
+      // early use can set TELEGRAM_ASSUME_CONSENT=true knowingly; it never
+      // overrides an explicit opt-out.
+      const explicitConsent = data.marketingConsent === true;
+      const assumedConsent = process.env.TELEGRAM_ASSUME_CONSENT === 'true' && data.marketingConsent !== false && data.unsubscribed !== true;
       return {
         id: `telegramchat_${chatId}`,
         chatId,
         displayName: data.customerName ?? data.firstName ?? 'Telegram subscriber',
         isActive: data.isActive !== false,
         isSubscribed: subscribed,
-        // Users who started the bot are treated as consented unless a field opts them out.
-        marketingConsent: data.marketingConsent !== false,
+        marketingConsent: explicitConsent || assumedConsent,
         segmentIds: Array.isArray(data.segmentIds) ? data.segmentIds.map(String) : ['all-consented'],
         language,
         unsubscribedAt: data.unsubscribedAt,

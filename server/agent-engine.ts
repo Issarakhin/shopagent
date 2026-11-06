@@ -1283,6 +1283,16 @@ export async function createWorkflowFromCommand(command: string, actor: string):
   }
 
   const workflowId = id('workflow');
+  // Validate every step against the live skill registry before we persist or run
+  // anything: unknown skills/actions and disabled skills/actions must never execute.
+  for (const item of plan.workflow.steps) {
+    const skill = state.skills.find((s) => s.id === item.skill);
+    if (!skill) throw Object.assign(new Error(`Unknown skill in plan: ${item.skill}.`), { code: 'UNKNOWN_SKILL' });
+    if (!skill.enabled) throw Object.assign(new Error(`Skill ${item.skill} is disabled.`), { code: 'SKILL_DISABLED' });
+    const action = skill.actions.find((a) => a.id === item.action);
+    if (!action) throw Object.assign(new Error(`Unknown action ${item.action} for skill ${item.skill}.`), { code: 'UNKNOWN_ACTION' });
+    if (!action.enabled) throw Object.assign(new Error(`Action ${item.skill}:${item.action} is disabled.`), { code: 'ACTION_DISABLED' });
+  }
   const workflow: Workflow = {
     id: workflowId,
     name: plan.workflow.name,
@@ -1468,6 +1478,25 @@ export async function runWorkflow(workflowId: string, actor = 'system'): Promise
     }
   }
   return agentStore.getState().workflows.find((item) => item.id === workflowId)!;
+}
+
+// Re-drive workflows that were mid-execution when the process stopped. Runs on
+// boot so an interrupted run resumes instead of hanging. Workflows waiting on a
+// human approval are left untouched (they resume when the approval is decided).
+export async function resumePendingWorkflows(actor = 'system'): Promise<number> {
+  const resumable = agentStore.getState().workflows.filter(
+    (workflow) => workflow.status === 'running' || workflow.status === 'pending',
+  );
+  let resumed = 0;
+  for (const workflow of resumable) {
+    try {
+      await runWorkflow(workflow.id, actor);
+      resumed += 1;
+    } catch (error) {
+      console.error(`Failed to resume workflow ${workflow.id}:`, error instanceof Error ? error.message : error);
+    }
+  }
+  return resumed;
 }
 
 async function executeWorkflowStep(workflowId: string, stepId: string, actor: string): Promise<void> {
