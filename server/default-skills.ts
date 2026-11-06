@@ -82,6 +82,7 @@ export const DEFAULT_SKILLS: SkillDefinition[] = [
     action('draft_reply', 'Draft reply', 'Draft a grounded response using verified order data.'),
     action('escalate_ticket', 'Escalate ticket', 'Escalate a risky or overdue case.', { riskLevel: 'medium', writeAction: true, approvalRequired: true }),
     action('prepare_refund_request', 'Prepare refund request', 'Prepare a refund request without issuing money.', { riskLevel: 'high', writeAction: true, approvalRequired: true }),
+    action('issue_approved_refund', 'Issue approved refund', 'Issue an approved refund through the configured payment provider. Requires approval.', { riskLevel: 'high', writeAction: true, approvalRequired: true }),
   ]),
   skill('analytics', 'Analytics', 'Produces evidence-based summaries, rankings, anomaly checks, and campaign measurement.', [
     action('generate_sales_summary', 'Generate sales summary', 'Summarize sales and order performance.'),
@@ -94,6 +95,7 @@ export const DEFAULT_SKILLS: SkillDefinition[] = [
   skill('logistics', 'Logistics', 'Validates fulfillment, creates shipment plans, detects delays, and reports exceptions.', [
     action('validate_fulfillment', 'Validate fulfillment', 'Check order, stock, and address readiness.'),
     action('create_shipment', 'Create shipment', 'Create a shipment plan after validation.', { riskLevel: 'medium', writeAction: true, approvalRequired: true }),
+    action('change_order_status', 'Change order status', 'Move an order to a new status (e.g. processing, shipped). Requires approval.', { riskLevel: 'high', writeAction: true, approvalRequired: true }),
     action('check_delivery_delay', 'Check delivery delay', 'Find orders that may be delayed.'),
     action('report_delivery_exception', 'Report delivery exception', 'Create a structured delivery exception.', { writeAction: true }),
   ]),
