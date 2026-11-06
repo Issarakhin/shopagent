@@ -196,6 +196,7 @@ agentRouter.post('/admin/campaigns/:id/retry', requireRole('owner', 'admin', 're
 });
 
 agentRouter.get('/admin/telegram-subscribers', (_req, res) => res.json(agentStore.getState().telegramSubscribers));
+agentRouter.get('/admin/leads', requireRole('owner', 'admin', 'operator'), (_req, res) => res.json(agentStore.getState().leads));
 agentRouter.post('/admin/telegram-subscribers', requireRole('owner', 'admin'), (req, res) => {
   if (!req.body?.chatId) return res.status(400).json({ error: 'chatId is required.' });
   const subscriber: TelegramSubscriber = {

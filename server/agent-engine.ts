@@ -594,6 +594,79 @@ async function executeSkill(workflow: Workflow, step: WorkflowStep): Promise<Ski
       });
     }
 
+    case 'sales:qualify_customer_lead': {
+      const inquiry = String(input.inquiryText ?? input.requestText ?? input.userRequest ?? '').trim();
+      if (!inquiry) return fail(step.skill, step.action, 'MISSING_INQUIRY', 'An inquiry text is required to qualify a lead.');
+      const products = readProducts();
+      const matched = matchProductsToText(inquiry, products);
+      const lang = detectLeadLanguage(inquiry);
+      // Phnom Penh relevance: CONFIRMED only when the caller passes an explicit
+      // confirmedLocation; a Khmer word or hashtag is merely inferred, never proof.
+      const confirmed = input.confirmedLocation === true || /phnom\s*penh|ភ្នំពេញ/i.test(String(input.location ?? ''));
+      const inferred = /ភ្នំពេញ|phnom\s*penh|#?khmer|កម្ពុជា|cambodia/i.test(inquiry);
+      const locationBasis = confirmed
+        ? 'Confirmed from an explicit location the lead provided.'
+        : inferred
+          ? 'Inferred only (Khmer/Cambodia signal in the text) — not confirmed.'
+          : 'No location signal.';
+      const consent = input.consentToContact === true;
+      const qualified = matched.length > 0;
+      const lead = {
+        id: id('lead'),
+        source: (['telegram', 'web_inquiry', 'referral', 'manual', 'social_public'] as const).includes(input.source as any) ? input.source as any : 'manual',
+        sourceUrl: typeof input.sourceUrl === 'string' ? input.sourceUrl : undefined,
+        inquiryText: inquiry.slice(0, 1000),
+        language: lang,
+        productInterestIds: matched.map((p) => p.id),
+        locationConfirmed: confirmed,
+        locationBasis,
+        consentToContact: consent,
+        qualification: (qualified ? 'qualified' : 'unqualified') as 'qualified' | 'unqualified',
+        qualificationReason: qualified
+          ? `Matches ${matched.map((p) => p.name).join(', ')} in the live catalogue.${confirmed ? ' Location confirmed in Phnom Penh.' : ''}`
+          : 'No in-catalogue product matched this inquiry.',
+        contactHandle: typeof input.contactHandle === 'string' ? input.contactHandle : undefined,
+        interactions: [{ at: now(), type: 'captured', note: 'Lead captured from a permitted source.' }],
+        workflowId: workflow.id,
+        createdAt: now(),
+        updatedAt: now(),
+      };
+      agentStore.mutate((draft) => { draft.leads.unshift(lead); });
+      return success(step.skill, step.action, `Lead ${lead.qualification} (${matched.length} product match${matched.length === 1 ? '' : 'es'}).`, { lead, matchedProducts: matched.map((p) => ({ id: p.id, name: p.name })) }, confirmed ? [] : ['Phnom Penh location is inferred, not confirmed.']);
+    }
+
+    case 'sales:draft_lead_outreach': {
+      const leadId = String(input.leadId ?? '');
+      const lead = agentStore.getState().leads.find((item) => item.id === leadId) ?? agentStore.getState().leads[0];
+      if (!lead) return fail(step.skill, step.action, 'LEAD_NOT_FOUND', 'No lead is available to draft outreach for.');
+      if (!lead.consentToContact) return fail(step.skill, step.action, 'NO_CONSENT', 'This lead has not consented to be contacted. Outreach is blocked.');
+      const outreachProducts = readProducts().filter((p) => lead.productInterestIds.includes(p.id));
+      const productLine = outreachProducts.map((p) => `${p.name} ($${p.price.toFixed(2)}/${p.unit})`).join(', ') || 'the products you asked about';
+      const en = `Hello! Thanks for your interest in ${productLine} at Shopping Cambodia. It's available now — reply here if you'd like details or to order. (You can opt out any time.)`;
+      const kh = `សួស្តី! អរគុណសម្រាប់ចំណាប់អារម្មណ៍លើ ${productLine} នៅ Shopping Cambodia។ ឆ្លើយតបប្រសិនបើអ្នកចង់ដឹងព័ត៌មានបន្ថែម ឬកម្មង់។`;
+      return success(step.skill, step.action, 'Lead outreach drafted (not sent — outbound needs approval).', {
+        leadId: lead.id, messageEn: en, messageKh: kh, combined: `${kh}\n\n${en}`,
+      }, ['Draft only. No message was sent; outbound outreach requires explicit approval and a compliant channel.']);
+    }
+
+    case 'sales:discover_social_opportunities': {
+      // Honest compliance boundary: automated listening/scraping of Facebook,
+      // Instagram, TikTok, etc. is NOT available without approved platform API
+      // credentials. We never scrape private accounts or fabricate leads.
+      const configured = Boolean(process.env.SOCIAL_LISTENING_PROVIDER && process.env.SOCIAL_LISTENING_TOKEN);
+      if (!configured) {
+        return success(step.skill, step.action, 'No approved social-listening source is configured, so no public signals were collected.', {
+          configured: false,
+          opportunities: [],
+          compliantAlternatives: [
+            'Capture genuine inbound inquiries via the Telegram bot or a website inquiry form (with consent), then qualify them with sales.qualify_customer_lead.',
+            'Connect an approved platform API (e.g. Meta Graph API for your OWN business page, or an authorized listening provider) and set SOCIAL_LISTENING_PROVIDER + SOCIAL_LISTENING_TOKEN.',
+          ],
+        }, ['Live public social discovery requires authorized platform API access; none is configured.']);
+      }
+      return success(step.skill, step.action, 'Social-listening provider configured; no live integration implemented yet.', { configured: true, opportunities: [] }, ['Provider configured but the live query is not implemented — reporting honestly rather than inventing leads.']);
+    }
+
     case 'support:categorize_ticket': {
       const text = String(input.requestText ?? input.reason ?? '').toLowerCase();
       const category = /refund|money back|charge|payment/.test(text) ? 'refund'
@@ -1032,6 +1105,35 @@ function aggregateCustomerHistory(orders: ReturnType<typeof readOrders>): Map<st
     result.set(key, { ...rest, topCategory });
   }
   return result;
+}
+
+// Match an inquiry to REAL catalogue products by name/category tokens. Returns
+// only actual products — never invents interest.
+function matchProductsToText(text: string, products: ReturnType<typeof readProducts>): ReturnType<typeof readProducts> {
+  const lower = text.toLowerCase();
+  const scored = products
+    .map((product) => {
+      const name = String(product.name ?? '').toLowerCase();
+      const category = String(product.category ?? '').toLowerCase();
+      let score = 0;
+      if (name && lower.includes(name)) score += 3;
+      if (category && lower.includes(category)) score += 1;
+      for (const token of name.split(/\s+/).filter((t) => t.length >= 4)) {
+        if (lower.includes(token)) score += 1;
+      }
+      return { product, score };
+    })
+    .filter((entry) => entry.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 5);
+  return scored.map((entry) => entry.product);
+}
+
+// Lightweight language detection for lead text: Khmer script vs Latin.
+function detectLeadLanguage(text: string): 'km' | 'en' | 'both' {
+  const hasKhmer = /[ក-៿]/.test(text);
+  const hasLatin = /[a-z]/i.test(text);
+  return hasKhmer && hasLatin ? 'both' : hasKhmer ? 'km' : 'en';
 }
 
 function isSubscriberEligible(subscriber: import('./types.js').TelegramSubscriber, segmentIds: string[]): boolean {

@@ -86,6 +86,7 @@ Planning behavior:
 - For every marketing workflow, pass the complete admin request to analytics.rank_products.input.userRequest. The analytics skill must select the actual product before campaign drafting.
 - A request such as ‘boost the fish product with the most stock’ means filter to the fish category, rank by available stock, select the result, and pass that exact product to the campaign draft.
 - A clearance request means choose a high-stock, slow-moving candidate. It must not invent or apply a discount; price changes require a separate approved pricing workflow.
+- To change stock levels (reduce, correct, set, or "reduce by X%"), use inventory.adjust_inventory with an exact productId and either setTo or adjustment. NEVER use inventory.release_stock to reduce stock — release_stock only releases a prior reservation and requires that reservation's exact reservationId.
 - For marketing requests, preserve the full admin request verbatim in create_campaign_draft.input.userRequest and campaignGoal so product-selection logic, tone, style, audience, length, exclusions and desired outcome are not lost.
 - Do not convert a free-form marketing request into a fixed campaign template.
 - If information required for a risky mutation is missing, ask a clarification question instead of guessing.

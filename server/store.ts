@@ -65,6 +65,7 @@ export function createInitialAgentState(): AgentState {
     dailyBoostRecommendations: [],
     shipments: [],
     deliveryExceptions: [],
+    leads: [],
   };
 }
 
@@ -131,6 +132,7 @@ function normalizeState(raw: Partial<AgentState>): AgentState {
     dailyBoostRecommendations: raw.dailyBoostRecommendations ?? [],
     shipments: raw.shipments ?? [],
     deliveryExceptions: raw.deliveryExceptions ?? [],
+    leads: raw.leads ?? [],
   };
 }
 
@@ -319,6 +321,7 @@ export class AgentStore {
     if (this.state.memories.length > 300) this.state.memories = this.state.memories.slice(0, 300);
     if (this.state.shipments.length > 500) this.state.shipments = this.state.shipments.slice(0, 500);
     if (this.state.deliveryExceptions.length > 500) this.state.deliveryExceptions = this.state.deliveryExceptions.slice(0, 500);
+    if (this.state.leads.length > 2000) this.state.leads = this.state.leads.slice(0, 2000);
 
     const temp = `${AGENT_FILE}.tmp`;
     fs.writeFileSync(temp, JSON.stringify(this.state, null, 2));
