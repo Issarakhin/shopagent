@@ -14,6 +14,18 @@ const app = express();
 // Falling back to 3000 keeps local development unchanged.
 const PORT = Number(process.env.PORT) || 3000;
 
+// Keep the dyno alive even if a request handler or a background task throws an
+// error nobody caught. Without these, one unhandled error crashes the Node
+// process; Heroku then answers the next requests with its own 503 page, which
+// carries NO CORS headers — so the browser reports a misleading CORS failure.
+// We log loudly instead of exiting so the API keeps serving.
+process.on('uncaughtException', (error) => {
+  console.error('[fatal] Uncaught exception (kept alive):', error);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[fatal] Unhandled promise rejection (kept alive):', reason);
+});
+
 // Any explicitly listed origin, plus any *.vercel.app deployment (production +
 // preview URLs) and localhost dev server, is allowed. The request origin is
 // echoed back (required when Allow-Credentials is set).
@@ -32,7 +44,11 @@ function isAllowedOrigin(origin: string): boolean {
   }
 }
 
-app.use((req, res, next) => {
+// Apply CORS headers to a response. Extracted so it can also run from the
+// error handler, guaranteeing that even a 500 carries CORS headers (a browser
+// otherwise reports a confusing "No Access-Control-Allow-Origin" instead of the
+// real error).
+function setCorsHeaders(req: express.Request, res: express.Response) {
   const origin = req.headers.origin;
   if (origin && isAllowedOrigin(origin)) {
     res.header('Access-Control-Allow-Origin', origin);
@@ -41,6 +57,10 @@ app.use((req, res, next) => {
   }
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
   res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, X-Admin-Key, X-Admin-User, X-Admin-Role, X-Telegram-Bot-Api-Secret-Token');
+}
+
+app.use((req, res, next) => {
+  setCorsHeaders(req, res);
   if (req.method === 'OPTIONS') {
     return res.sendStatus(204);
   }
@@ -598,6 +618,17 @@ async function startServer() {
     });
     console.log('Serving production static assets.');
   }
+
+  // Final error handler: any error thrown/forwarded by a route lands here. We
+  // re-apply CORS headers (they may have been set already, but this is a
+  // guarantee) and return JSON 500 instead of letting the error bubble up and
+  // potentially crash the process. Must be registered after all routes.
+  app.use((err: unknown, req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    console.error('[error] Unhandled route error:', err);
+    setCorsHeaders(req, res);
+    if (res.headersSent) return;
+    res.status(500).json({ error: 'Internal server error.' });
+  });
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`Shopping Cambodia Full-Stack Server running on http://localhost:${PORT}`);
