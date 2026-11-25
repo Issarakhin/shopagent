@@ -52,6 +52,7 @@ export const DEFAULT_SKILLS: SkillDefinition[] = [
   ]),
   skill('sales', 'Sales', 'Uses real customer and order data to identify leads, segment customers, and prepare offers.', [
     action('identify_real_leads', 'Identify real leads', 'Find existing customers with genuine purchase or engagement signals.'),
+    action('find_customer_opportunities', 'Find customer opportunities', 'Surface a prioritized, actionable list of who to act on now: inbound leads to contact, past customers due for re-engagement, and unmet-demand product gaps — all from real data.'),
     action('create_offer_draft', 'Create offer draft', 'Prepare an offer without contacting customers.', { writeAction: true }),
     action('update_pipeline', 'Update pipeline', 'Update a lead stage using verified activity.', { riskLevel: 'medium', writeAction: true }),
     action('prepare_follow_up', 'Prepare follow-up', 'Draft a consent-aware follow-up.'),

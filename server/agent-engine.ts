@@ -553,6 +553,92 @@ async function executeSkill(workflow: Workflow, step: WorkflowStep): Promise<Ski
       return success(step.skill, step.action, `Identified ${leads.length} real leads from existing order data.`, { leads });
     }
 
+    case 'sales:find_customer_opportunities': {
+      // One prioritized, ACTIONABLE view of who to act on now, built only from
+      // real data: captured leads, real order history, and first-party demand
+      // signals. Each opportunity names the recommended next sales action.
+      const reengageDays = Number(process.env.SALES_REENGAGE_DAYS ?? 30);
+      const nowMs = Date.now();
+      const opportunities: Array<Record<string, unknown>> = [];
+
+      // 1) Captured leads that need a human next step (updates): qualified or new,
+      //    consented, and not yet contacted or converted.
+      const leads = agentStore.getState().leads ?? [];
+      for (const lead of leads) {
+        if (lead.qualification === 'converted' || lead.qualification === 'contacted') continue;
+        const productNames = lead.productInterestIds
+          .map((pid) => readProducts().find((p) => p.id === pid)?.name)
+          .filter(Boolean);
+        opportunities.push({
+          type: 'lead',
+          priority: lead.qualification === 'qualified' && lead.consentToContact ? 1 : 2,
+          leadId: lead.id,
+          label: lead.contactHandle ?? 'Inbound lead',
+          status: lead.qualification,
+          consentToContact: lead.consentToContact,
+          locationConfirmed: lead.locationConfirmed,
+          interestProducts: productNames,
+          recommendedAction: lead.consentToContact ? 'sales:draft_lead_outreach' : 'await consent',
+          reason: lead.consentToContact
+            ? `Qualified inbound lead interested in ${productNames.join(', ') || 'your products'}; ready for a personalized reply.`
+            : 'Lead has not consented to contact yet — capture consent before outreach.',
+        });
+      }
+
+      // 2) Past customers due for re-engagement (an "update" worth sending).
+      const orders = readOrders().filter((order) => order.status !== 'cancelled');
+      const history = aggregateCustomerHistory(orders);
+      for (const customer of history.values()) {
+        const daysSince = Math.floor((nowMs - new Date(customer.lastOrderAt).getTime()) / (24 * 60 * 60 * 1000));
+        if (daysSince < reengageDays) continue;
+        opportunities.push({
+          type: 'reengage',
+          priority: 3,
+          customerEmail: customer.email,
+          label: customer.name,
+          orders: customer.orders,
+          revenue: Number(customer.revenue.toFixed(2)),
+          daysSinceLastOrder: daysSince,
+          favouriteCategory: customer.topCategory,
+          recommendedAction: 'sales:prepare_follow_up',
+          reason: `Bought ${customer.orders} time(s) (last ${daysSince} days ago). Worth a consent-aware re-engagement.`,
+        });
+      }
+
+      // 3) Unmet demand: products people want but are not buying — a clear gap to
+      //    convert with an offer or boost.
+      const demand = computeDemandIndex(reengageDays);
+      for (const item of demand.unmetDemand) {
+        opportunities.push({
+          type: 'demand_gap',
+          priority: 2,
+          productId: item.productId,
+          label: item.name,
+          interest: item.interest,
+          trend: item.trend,
+          stock: item.stock,
+          recommendedAction: item.stock > 0 ? 'marketing:create_campaign_draft' : 'inventory:recommend_reorder',
+          reason: item.stock > 0
+            ? `Strong interest (${item.interest}) with no purchases yet${item.trend === 'rising' ? ' and rising' : ''} — convert it with a targeted offer.`
+            : `Demand exists but the product is out of stock — reorder to capture it.`,
+        });
+      }
+
+      opportunities.sort((a, b) => Number(a.priority) - Number(b.priority));
+      const counts = {
+        leads: opportunities.filter((o) => o.type === 'lead').length,
+        reengage: opportunities.filter((o) => o.type === 'reengage').length,
+        demandGaps: opportunities.filter((o) => o.type === 'demand_gap').length,
+      };
+      return success(
+        step.skill,
+        step.action,
+        `Found ${opportunities.length} customer opportunities: ${counts.leads} lead(s) to contact, ${counts.reengage} customer(s) to re-engage, ${counts.demandGaps} unmet-demand gap(s).`,
+        { opportunities: opportunities.slice(0, 50), counts, demandSummary: { rising: demand.rising.map((r) => r.name), phnomPenhSignals: demand.phnomPenhSignals } },
+        opportunities.length === 0 ? ['No actionable customer opportunities from current data yet — capture more inquiries and storefront traffic.'] : [],
+      );
+    }
+
     case 'sales:segment_customers': {
       if (!state.controls.segmentationEnabled) return fail(step.skill, step.action, 'FEATURE_DISABLED', 'Customer segmentation is disabled.');
       const segments = calculateCustomerSegments();
@@ -1103,28 +1189,41 @@ export function computeDemandIndex(windowDays = 30) {
   const leads = state.leads ?? [];
 
   const weights: Record<string, number> = { purchase: 5, add_to_cart: 3, checkout_started: 2, product_view: 1, search: 2 };
-  type Row = { productId: string; name: string; category: string; score: number; phnomPenhScore: number; signals: Record<string, number>; leadInterest: number; stock: number };
+  // Split the window in half to measure trend: signals in the recent half vs the
+  // prior half tell us whether demand for a product is rising or falling.
+  const midpoint = Date.now() - (windowDays / 2) * 24 * 60 * 60 * 1000;
+  type Row = {
+    productId: string; name: string; category: string; score: number; phnomPenhScore: number;
+    signals: Record<string, number>; leadInterest: number; stock: number;
+    conversions: number; interest: number; recentScore: number; priorScore: number;
+  };
   const rows = new Map<string, Row>();
   const rowFor = (productId: string): Row | undefined => {
     const product = products.find((p) => p.id === productId);
     if (!product) return undefined;
     if (!rows.has(productId)) {
-      rows.set(productId, { productId, name: product.name, category: product.category, score: 0, phnomPenhScore: 0, signals: {}, leadInterest: 0, stock: availableToPromise(product) });
+      rows.set(productId, { productId, name: product.name, category: product.category, score: 0, phnomPenhScore: 0, signals: {}, leadInterest: 0, stock: availableToPromise(product), conversions: 0, interest: 0, recentScore: 0, priorScore: 0 });
     }
     return rows.get(productId);
+  };
+  const addSignal = (row: Row, type: string, amount: number, when: number, isConversion: boolean) => {
+    row.score += amount;
+    row.signals[type] = (row.signals[type] ?? 0) + amount;
+    if (isConversion) row.conversions += amount; else row.interest += amount;
+    if (when >= midpoint) row.recentScore += amount; else row.priorScore += amount;
   };
 
   for (const event of events) {
     const weight = weights[event.type as string];
     if (!weight) continue;
+    const when = new Date(event.createdAt).getTime() || Date.now();
     // Direct product signals.
     if (typeof event.productId === 'string') {
       const row = rowFor(event.productId);
       if (row) {
         const qty = Number.isFinite(Number(event.quantity)) && Number(event.quantity) > 0 ? Number(event.quantity) : 1;
         const add = event.type === 'purchase' || event.type === 'add_to_cart' ? weight * qty : weight;
-        row.score += add;
-        row.signals[event.type] = (row.signals[event.type] ?? 0) + add;
+        addSignal(row, event.type as string, add, when, event.type === 'purchase');
       }
     }
     // Free-text searches (metadata.query) matched to the catalogue by name/category.
@@ -1134,7 +1233,7 @@ export function computeDemandIndex(windowDays = 30) {
         for (const product of products) {
           if (q.includes(product.name.toLowerCase()) || q.includes(String(product.category).toLowerCase())) {
             const row = rowFor(product.id);
-            if (row) { row.score += weights.search; row.signals.search = (row.signals.search ?? 0) + weights.search; }
+            if (row) addSignal(row, 'search', weights.search, when, false);
           }
         }
       }
@@ -1147,19 +1246,33 @@ export function computeDemandIndex(windowDays = 30) {
   for (const lead of leads) {
     const confirmed = lead.locationConfirmed === true;
     if (confirmed) phnomPenhSignals += 1;
+    const when = new Date(lead.updatedAt ?? lead.createdAt).getTime() || Date.now();
     for (const productId of lead.productInterestIds ?? []) {
       const row = rowFor(productId);
       if (!row) continue;
-      row.score += 4;
       row.leadInterest += 1;
-      row.signals.lead_interest = (row.signals.lead_interest ?? 0) + 4;
+      addSignal(row, 'lead_interest', 4, when, false);
       if (confirmed) { row.score += 2; row.phnomPenhScore += 6; }
     }
   }
 
-  const all = [...rows.values()].filter((r) => r.score > 0).sort((a, b) => b.score - a.score);
+  // Trend per product: compare the recent half-window to the prior half-window.
+  const withTrend = [...rows.values()].map((row) => {
+    const delta = row.recentScore - row.priorScore;
+    const base = row.priorScore || 1;
+    const momentum = Number((delta / base).toFixed(2));
+    const trend: 'rising' | 'falling' | 'steady' = row.recentScore > row.priorScore * 1.25 ? 'rising' : row.recentScore < row.priorScore * 0.75 ? 'falling' : 'steady';
+    // Unmet demand: real interest that is NOT converting into purchases.
+    const unmetScore = Math.max(0, row.interest - row.conversions);
+    return { ...row, momentum, trend, unmetScore };
+  });
+
+  const all = withTrend.filter((r) => r.score > 0).sort((a, b) => b.score - a.score);
   const topProducts = all.slice(0, 10);
-  const phnomPenh = [...rows.values()].filter((r) => r.phnomPenhScore > 0).sort((a, b) => b.phnomPenhScore - a.phnomPenhScore).slice(0, 10);
+  const phnomPenh = withTrend.filter((r) => r.phnomPenhScore > 0).sort((a, b) => b.phnomPenhScore - a.phnomPenhScore).slice(0, 10);
+  // Products people want but aren't buying — the clearest sales opportunity.
+  const unmetDemand = withTrend.filter((r) => r.unmetScore > 0 && r.conversions === 0).sort((a, b) => b.unmetScore - a.unmetScore).slice(0, 10);
+  const rising = all.filter((r) => r.trend === 'rising').slice(0, 10);
 
   // Category roll-up.
   const categoryScores = new Map<string, number>();
@@ -1167,7 +1280,7 @@ export function computeDemandIndex(windowDays = 30) {
   const topCategories = [...categoryScores.entries()].map(([category, score]) => ({ category, score })).sort((a, b) => b.score - a.score).slice(0, 6);
 
   const totalSignals = all.reduce((sum, r) => sum + Object.values(r.signals).reduce((s, v) => s + v, 0), 0);
-  return { windowDays, totalSignals, phnomPenhSignals, topProducts, phnomPenhDemand: phnomPenh, topCategories };
+  return { windowDays, totalSignals, phnomPenhSignals, topProducts, phnomPenhDemand: phnomPenh, unmetDemand, rising, topCategories };
 }
 
 // Live query to an AUTHORIZED social-listening provider, when one is connected.

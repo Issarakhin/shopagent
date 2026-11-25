@@ -137,6 +137,7 @@ Planning behavior:
 - For every marketing workflow, pass the complete admin request to analytics.rank_products.input.userRequest. The analytics skill must select the actual product before campaign drafting.
 - A request such as ‘boost the fish product with the most stock’ means filter to the fish category, rank by available stock, select the result, and pass that exact product to the campaign draft.
 - A clearance request means choose a high-stock, slow-moving candidate. It must not invent or apply a discount; price changes require a separate approved pricing workflow.
+- To find customers, find new leads, get customer updates, decide who to contact, or re-engage past buyers, use sales.find_customer_opportunities — it returns a prioritized list (inbound leads to contact, customers due for re-engagement, and unmet-demand product gaps) from real data. Follow it with sales.draft_lead_outreach, sales.prepare_follow_up or sales.create_offer_draft for a specific customer.
 - To change stock levels, use inventory.adjust_inventory with an exact productId and ONE of: setTo (exact new level), adjustment (delta, negative to reduce), reduceByPercent (reduce by this percent of current DB stock), or setToPercent (set to this percent of current DB stock). For a percentage request like "reduce stock by 20%" use reduceByPercent: 20 — the backend reads the live stock from the database and computes the amount, so you do NOT need to know or fetch the current quantity yourself. NEVER use inventory.release_stock to reduce stock — release_stock only releases a prior reservation and requires that reservation's exact reservationId.
 - For marketing requests, preserve the full admin request verbatim in create_campaign_draft.input.userRequest and campaignGoal so product-selection logic, tone, style, audience, length, exclusions and desired outcome are not lost.
 - Do not convert a free-form marketing request into a fixed campaign template.
@@ -560,6 +561,16 @@ function fallbackPlan(command: string, context: Record<string, unknown>): MainAg
       workflow: { name: 'Dynamic pricing review', goal: command, riskLevel: 'high', steps: [
         { id: 'step_1', skill: 'finance', action: 'recommend_dynamic_pricing', dependsOn: [], requiresApproval: false, input: {} },
         { id: 'step_2', skill: 'finance', action: 'apply_approved_price', dependsOn: ['step_1'], requiresApproval: true, input: {} },
+      ] },
+    };
+  }
+  if (lower.includes('find customer') || lower.includes('find more customer') || lower.includes('find lead') || lower.includes('find more lead')
+      || lower.includes('who should i') || lower.includes('who to contact') || lower.includes('customer update') || lower.includes('customer opportunit')
+      || lower.includes('new customer') || lower.includes('more customer') || lower.includes('re-engage') || lower.includes('reengage') || lower.includes('win back')) {
+    return {
+      intent: 'find_customer_opportunities', summary: 'Find a prioritized, actionable list of customers to act on now, from real leads, order history, and demand signals.', requiresWorkflow: true, warnings: [],
+      workflow: { name: 'Find customer opportunities', goal: command, riskLevel: 'low', steps: [
+        { id: 'step_1', skill: 'sales', action: 'find_customer_opportunities', dependsOn: [], requiresApproval: false, input: {} },
       ] },
     };
   }
