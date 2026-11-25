@@ -504,6 +504,22 @@ function fallbackPlan(command: string, context: Record<string, unknown>): MainAg
       ] },
     };
   }
+  // Drive sales end to end: find who to sell to + the demand, then prepare a
+  // personalized, ready-to-send offer (with a buy link). Outward send stays
+  // approval-gated. Matched before the generic campaign route so "sell more" /
+  // "make sales" builds the full selling flow, while "sell X with a campaign"
+  // still falls through to the campaign route below.
+  if (lower.includes('sell more') || lower.includes('make sales') || lower.includes('drive sales') || lower.includes('increase sales')
+      || lower.includes('more sales') || lower.includes('boost sales') || lower.includes('grow sales') || lower.includes('go sell')
+      || lower.includes('sell to') || lower.includes('close sales') || lower.includes('get sales')) {
+    return {
+      intent: 'drive_sales', summary: 'Find the best customers and demand, then prepare a personalized offer ready for approval. No customer is contacted automatically.', requiresWorkflow: true, warnings: [],
+      workflow: { name: 'Drive sales', goal: command, riskLevel: 'low', steps: [
+        { id: 'step_1', skill: 'sales', action: 'find_customer_opportunities', dependsOn: [], requiresApproval: false, input: {} },
+        { id: 'step_2', skill: 'sales', action: 'create_offer_draft', dependsOn: ['step_1'], requiresApproval: false, input: {} },
+      ] },
+    };
+  }
   if (lower.includes('campaign') || lower.includes('telegram') || lower.includes('advert') || lower.includes('promote') || lower.includes('boost') || lower.includes('sell') || lower.includes('clearance') || lower.includes('clear stock') || lower.includes('move stock') || lower.includes('feature')) {
     return {
       intent: 'create_marketing_campaign',

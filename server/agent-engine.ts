@@ -647,7 +647,31 @@ async function executeSkill(workflow: Workflow, step: WorkflowStep): Promise<Ski
 
     case 'sales:create_offer_draft': {
       const orders = readOrders().filter((order) => order.status !== 'cancelled');
-      if (!orders.length) return fail(step.skill, step.action, 'NO_CUSTOMER_DATA', 'No customer order history is available to build a grounded offer.');
+      if (!orders.length) {
+        // No order history yet: build a grounded offer from the best lead
+        // opportunity surfaced by sales:find_customer_opportunities (step 1 of
+        // the Drive-sales flow), so the selling flow still works pre-orders.
+        const opp = Object.values(dependencies)
+          .flatMap((value) => (value && typeof value === 'object' && Array.isArray((value as any).opportunities) ? (value as any).opportunities : []))
+          .find((o: any) => o?.type === 'lead' || o?.type === 'demand_gap');
+        if (opp) {
+          const products = readProducts();
+          const interestName = Array.isArray(opp.interestProducts) ? opp.interestProducts[0] : opp.label;
+          const product = products.find((p) => p.name === interestName || p.id === opp.productId) ?? products.find((p) => availableToPromise(p) > 0);
+          const buyLink = product ? productLink(product.id) : storeBaseUrl();
+          const who = opp.type === 'lead' ? (opp.label ?? 'there') : 'there';
+          const body = product
+            ? `Hi ${who}, thanks for your interest in ${product.name} ($${product.price.toFixed(2)}/${product.unit}) at Shopping Cambodia. It's in stock now — order it here: ${buyLink}. Reply if you'd like help.`
+            : `Hi ${who}, thanks for your interest in Shopping Cambodia. Browse what's in stock here: ${buyLink}.`;
+          return success(step.skill, step.action, 'Personalized offer draft prepared from the top opportunity. No customer was contacted.', {
+            draft: {
+              leadId: opp.leadId, customerName: opp.label, subject: product ? `${product.name} is ready for you` : 'A pick for you',
+              body, recommendedProductId: product?.id, buyLink, basedOn: { source: opp.type, interest: interestName },
+            },
+          }, opp.type === 'lead' && opp.consentToContact === false ? ['This lead has not consented to contact — get consent before sending.'] : []);
+        }
+        return fail(step.skill, step.action, 'NO_CUSTOMER_DATA', 'No customer order history or lead opportunity is available to build a grounded offer.');
+      }
       const products = readProducts();
       const history = aggregateCustomerHistory(orders);
       const requestedEmail = typeof input.customerEmail === 'string' ? input.customerEmail.toLowerCase() : '';
@@ -667,9 +691,11 @@ async function executeSkill(workflow: Workflow, step: WorkflowStep): Promise<Ski
       const recommended = boughtInStock ?? categoryPick ?? products.find((p) => availableToPromise(p) > 0);
       const topProducts = customer.productNames.slice(0, 3).join(', ') || 'your past purchases';
       const subject = recommended ? `A ${recommended.name} pick for you, ${customer.name}` : `An offer for you, ${customer.name}`;
+      // Include a direct buy link so the offer is actionable commerce, not just text.
+      const buyLink = recommended ? productLink(recommended.id) : storeBaseUrl();
       const body = recommended
-        ? `Hi ${customer.name}, thank you for your ${customer.orders} order${customer.orders === 1 ? '' : 's'} with Shopping Cambodia (you've enjoyed ${topProducts}). Based on what you buy, you may like ${recommended.name} ($${recommended.price.toFixed(2)}/${recommended.unit}), which is in stock now. Reply if you'd like us to set some aside.`
-        : `Hi ${customer.name}, thank you for your ${customer.orders} order${customer.orders === 1 ? '' : 's'} with Shopping Cambodia. We'd love to help you find your next favourite — reply and tell us what you're after.`;
+        ? `Hi ${customer.name}, thank you for your ${customer.orders} order${customer.orders === 1 ? '' : 's'} with Shopping Cambodia (you've enjoyed ${topProducts}). Based on what you buy, you may like ${recommended.name} ($${recommended.price.toFixed(2)}/${recommended.unit}), which is in stock now. Order it here: ${buyLink} — or reply and we'll set some aside.`
+        : `Hi ${customer.name}, thank you for your ${customer.orders} order${customer.orders === 1 ? '' : 's'} with Shopping Cambodia. Browse what's in stock here: ${buyLink} — or reply and tell us what you're after.`;
       return success(step.skill, step.action, `Personalized offer draft prepared for ${customer.name}. No customer was contacted.`, {
         draft: {
           customerEmail: customer.email,
@@ -677,6 +703,7 @@ async function executeSkill(workflow: Workflow, step: WorkflowStep): Promise<Ski
           subject,
           body,
           recommendedProductId: recommended?.id,
+          buyLink,
           basedOn: { orders: customer.orders, revenue: Number(customer.revenue.toFixed(2)), topProducts: customer.productNames.slice(0, 3), favouriteCategory: favCategory, lastOrderAt: customer.lastOrderAt },
         },
       });
